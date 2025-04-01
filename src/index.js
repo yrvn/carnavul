@@ -1,10 +1,9 @@
-import { Command } from "commander";
-import { createLogger, format, transports } from "winston";
-import fs from "fs-extra";
-import path from "path";
-import youtubeDl from "youtube-dl-exec";
-import dayjs from "dayjs";
-import { execSync } from "child_process";
+const { Command } = require("commander");
+const { createLogger, format, transports } = require("winston");
+const fs = require("fs-extra");
+const path = require("path");
+const dayjs = require("dayjs");
+const { execSync } = require("child_process");
 
 // Configure logger with console formatting
 const logger = createLogger({
@@ -23,6 +22,22 @@ const logger = createLogger({
     }),
   ],
 });
+
+// Generate NFO file content
+const generateNfoContent = (videoInfo, conjunto, year) => {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<movie>
+    <title>${conjunto.name} ${year}</title>
+    <originaltitle>${videoInfo.title}</originaltitle>
+    <sorttitle>${conjunto.name} ${year}</sorttitle>
+    <year>${year}</year>
+    <genre>Carnival</genre>
+    <genre>${conjunto.category}</genre>
+    <plot>${videoInfo.description || ""}</plot>
+    <source>YouTube</source>
+    <dateadded>${new Date().toISOString()}</dateadded>
+</movie>`;
+};
 
 // Load configuration
 const loadConfig = async () => {
@@ -57,7 +72,6 @@ const initTrackingFiles = async (baseDir) => {
     failed: path.join(trackingDir, "failed.json"),
   };
 
-  // Initialize files if they don't exist
   for (const [key, filePath] of Object.entries(files)) {
     if (key === "downloaded") {
       await fs.ensureFile(filePath);
@@ -78,7 +92,6 @@ const initTrackingFiles = async (baseDir) => {
 const parseVideoTitle = (title, conjuntos) => {
   logger.info(`Parsing video title: ${title}`);
 
-  // Extract year (19XX or 20XX)
   const yearMatch = title.match(/\b(19|20)\d{2}\b/);
   const year = yearMatch ? yearMatch[0] : null;
 
@@ -88,7 +101,6 @@ const parseVideoTitle = (title, conjuntos) => {
     logger.info(`Found year: ${year}`);
   }
 
-  // Find conjunto name
   let foundConjunto = null;
   for (const [category, groupList] of Object.entries(conjuntos)) {
     const conjunto = groupList.find((name) =>
@@ -119,13 +131,11 @@ const shouldDownload = (videoInfo) => {
 
   const durationMinutes = parseInt(duration) / 60;
 
-  // Check minimum duration
   if (durationMinutes < 30) {
     logger.info("Video too short, skipping");
     return false;
   }
 
-  // Check title conditions
   const hasActuacionCompleta = title
     .toLowerCase()
     .includes("actuacion completa");
@@ -136,7 +146,6 @@ const shouldDownload = (videoInfo) => {
     `Title conditions: actuacion completa: ${hasActuacionCompleta}, fragmento: ${hasFragmento}, resumen: ${hasResumen}`
   );
 
-  // Extract year for fragmento condition
   const yearMatch = title.match(/\b(19|20)\d{2}\b/);
   const year = yearMatch ? parseInt(yearMatch[0]) : null;
 
@@ -158,21 +167,40 @@ const shouldDownload = (videoInfo) => {
 };
 
 // Download video using yt-dlp
-const downloadVideo = async (videoUrl, outputPath, trackingFiles) => {
+const downloadVideo = async (
+  videoUrl,
+  outputPath,
+  trackingFiles,
+  videoInfo,
+  conjunto,
+  year
+) => {
   logger.info(`Starting download for: ${videoUrl}`);
   logger.info(`Output path: ${outputPath}`);
 
   try {
+    // Create clean filename
+    const baseDir = path.dirname(outputPath);
+    const cleanName = `${conjunto.name} ${year}`;
+    const outputTemplate = path.join(baseDir, cleanName + ".%(ext)s");
+
     const command =
       `yt-dlp "${videoUrl}" ` +
       `--format "bestvideo[height<=1080]+bestaudio/best[height<=1080]" ` +
-      `--output "${outputPath}" ` +
+      `--output "${outputTemplate}" ` +
       `--write-info-json ` +
       `--download-archive "${trackingFiles.downloaded}" ` +
       "--retries 3";
 
     logger.info("Executing yt-dlp command...");
     execSync(command, { stdio: "inherit" });
+
+    // Generate and save NFO file
+    const nfoContent = generateNfoContent(videoInfo, conjunto, year);
+    const nfoPath = path.join(baseDir, `${cleanName}.nfo`);
+    await fs.writeFile(nfoPath, nfoContent);
+    logger.info(`Generated NFO file at ${nfoPath}`);
+
     logger.info("Download completed successfully");
     return true;
   } catch (error) {
@@ -205,12 +233,9 @@ const processChannel = async (
   };
 
   try {
-    // Load configuration and initialize tracking
-    logger.info("Loading configuration and initializing tracking files...");
     const conjuntos = await loadConfig();
     const trackingFiles = await initTrackingFiles(trackingFilesPath || baseDir);
 
-    // Get channel videos
     logger.info("Fetching channel information...");
     const command = `yt-dlp "${channelUrl}" --dump-json --flat-playlist --playlist-reverse`;
     const result = execSync(command).toString();
@@ -258,18 +283,20 @@ const processChannel = async (
         continue;
       }
 
-      // Create output directory structure
       const outputDir = path.join(baseDir, year, conjunto.category);
       await fs.ensureDir(outputDir);
       logger.info(`Created output directory: ${outputDir}`);
 
-      const outputPath = path.join(
-        outputDir,
-        `${conjunto.name} - ${year}%(title)s.%(ext)s`
-      );
+      const outputPath = path.join(outputDir, `${conjunto.name} ${year}`);
 
-      // Download video
-      const success = await downloadVideo(video.url, outputPath, trackingFiles);
+      const success = await downloadVideo(
+        video.url,
+        outputPath,
+        trackingFiles,
+        video,
+        conjunto,
+        year
+      );
       if (success) {
         stats.downloaded++;
         stats.categories[conjunto.category] =
@@ -281,7 +308,6 @@ const processChannel = async (
       }
     }
 
-    // Generate report
     const report = {
       ...stats,
       duration: (Date.now() - startTime) / 1000,
