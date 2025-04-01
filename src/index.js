@@ -334,7 +334,14 @@ const processChannel = async (
         ignored.push({
           url: video.url,
           title: video.title,
-          reason: "Missing year or conjunto information",
+          reason: `Could not identify ${
+            !year ? "year" : "conjunto name"
+          } in title: "${video.title}"`,
+          metadata: {
+            yearFound: year || null,
+            conjuntoFound: conjunto?.name || null,
+            normalizedTitle: normalizeString(video.title),
+          },
         });
         await fs.writeJson(trackingFiles.ignored, ignored);
         stats.ignored++;
@@ -349,7 +356,16 @@ const processChannel = async (
         checkLater.push({
           url: video.url,
           title: video.title,
-          reason: "Does not meet download criteria",
+          reason: `Video duration: ${video.duration}s. Must be >30min or contain 'actuacion completa' or ('fragmento' and year < 2005). Title cannot contain 'RESUMEN'`,
+          metadata: {
+            duration: video.duration,
+            hasActuacionCompleta: video.title
+              .toLowerCase()
+              .includes("actuacion completa"),
+            hasFragmento: video.title.toLowerCase().includes("fragmento"),
+            hasResumen: video.title.toUpperCase().includes("RESUMEN"),
+            year: year,
+          },
         });
         await fs.writeJson(trackingFiles.checkLater, checkLater);
         stats.checkLater++;
