@@ -166,6 +166,24 @@ const shouldDownload = (videoInfo) => {
   return false;
 };
 
+// Add this helper function to handle yt-dlp commands
+const runYtDlp = (command) => {
+  try {
+    return execSync(command, {
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+    });
+  } catch (error) {
+    logger.error("yt-dlp command failed", {
+      command,
+      error: error.message,
+      stderr: error.stderr?.toString(),
+      stdout: error.stdout?.toString(),
+    });
+    throw error;
+  }
+};
+
 // Download video using yt-dlp
 const downloadVideo = async (
   videoUrl,
@@ -238,7 +256,7 @@ const processChannel = async (
 
     logger.info("Fetching channel information...");
     const command = `yt-dlp "${channelUrl}" --dump-json --flat-playlist --playlist-reverse`;
-    const result = execSync(command).toString();
+    const result = execSync(command, { encoding: "utf-8" });
     const videos = result
       .trim()
       .split("\n")
