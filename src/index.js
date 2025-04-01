@@ -89,10 +89,62 @@ const initTrackingFiles = async (baseDir) => {
   return files;
 };
 
+// String normalization helper
+const normalizeString = (str) => {
+  return str
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove accents
+    .replace(/['\s]/g, "") // remove spaces and apostrophes
+    .replace(/[^a-z0-9]/g, ""); // remove other special chars
+};
+
+// Calculate string similarity (Levenshtein-based)
+const calculateSimilarity = (str1, str2) => {
+  const s1 = normalizeString(str1);
+  const s2 = normalizeString(str2);
+
+  // First check for exact inclusion
+  if (s1.includes(s2) || s2.includes(s1)) {
+    return 1;
+  }
+
+  // Calculate Levenshtein distance
+  const matrix = [];
+  let i, j;
+
+  for (i = 0; i <= s1.length; i++) {
+    matrix[i] = [i];
+  }
+
+  for (j = 0; j <= s2.length; j++) {
+    matrix[0][j] = j;
+  }
+
+  for (i = 1; i <= s1.length; i++) {
+    for (j = 1; j <= s2.length; j++) {
+      if (s1[i - 1] === s2[j - 1]) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+
+  const distance = matrix[s1.length][s2.length];
+  const maxLength = Math.max(s1.length, s2.length);
+  return (maxLength - distance) / maxLength;
+};
+
 // Parse video title to extract year and conjunto name
 const parseVideoTitle = (title, conjuntos) => {
   logger.info(`Parsing video title: ${title}`);
 
+  // Extract year (19XX or 20XX)
   const yearMatch = title.match(/\b(19|20)\d{2}\b/);
   const year = yearMatch ? yearMatch[0] : null;
 
@@ -102,22 +154,32 @@ const parseVideoTitle = (title, conjuntos) => {
     logger.info(`Found year: ${year}`);
   }
 
+  // Find conjunto name with improved matching
   let foundConjunto = null;
+  let bestMatchScore = 0;
+
   for (const [category, groupList] of Object.entries(conjuntos)) {
-    const conjunto = groupList.find((name) =>
-      title.toLowerCase().includes(name.toLowerCase())
-    );
-    if (conjunto) {
-      foundConjunto = {
-        name: conjunto,
-        category,
-      };
-      logger.info(`Found conjunto: ${conjunto} in category: ${category}`);
-      break;
+    for (const conjunto of groupList) {
+      const similarity = calculateSimilarity(title, conjunto);
+
+      if (similarity > 0.85 && similarity > bestMatchScore) {
+        foundConjunto = {
+          name: conjunto,
+          category,
+          similarity,
+        };
+        bestMatchScore = similarity;
+      }
     }
   }
 
-  if (!foundConjunto) {
+  if (foundConjunto) {
+    logger.info(
+      `Found conjunto: ${foundConjunto.name} in category: ${
+        foundConjunto.category
+      } (similarity: ${foundConjunto.similarity.toFixed(2)})`
+    );
+  } else {
     logger.info("No conjunto found in title");
   }
 
