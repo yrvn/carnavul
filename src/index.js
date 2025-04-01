@@ -1,9 +1,9 @@
-const { Command } = require("commander");
-const { createLogger, format, transports } = require("winston");
-const fs = require("fs-extra");
-const path = require("path");
-const dayjs = require("dayjs");
-const { execSync } = require("child_process");
+import { Command } from "commander";
+import { createLogger, format, transports } from "winston";
+import fs from "fs-extra";
+import path from "path";
+import dayjs from "dayjs";
+import { execSync } from "child_process";
 
 // Configure logger with console formatting
 const logger = createLogger({
