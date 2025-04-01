@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { createLogger, format, transports } from "winston";
 import fs from "fs-extra";
 import path from "path";
+import youtubeDl from "youtube-dl-exec";
 import dayjs from "dayjs";
 import { execSync } from "child_process";
 
@@ -255,26 +256,18 @@ const processChannel = async (
     const trackingFiles = await initTrackingFiles(trackingFilesPath || baseDir);
 
     logger.info("Fetching channel information...");
-    const command = `yt-dlp "${channelUrl}" --dump-json --flat-playlist --playlist-reverse`;
-    const result = execSync(command, { encoding: "utf-8" });
-    const videos = result
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
+    const channelInfo = await youtubeDl(channelUrl, {
+      dumpSingleJson: true,
+      flatPlaylist: true,
+      playlistReverse: true, // Oldest first
+    });
 
-    logger.info(`Found ${videos.length} videos in channel`);
+    logger.info(`Found ${channelInfo.entries.length} videos in channel`);
 
-    for (const [index, video] of videos.entries()) {
-      logger.info(
-        `Processing video ${index + 1}/${videos.length}: ${video.title}`
-      );
-
+    for (const video of channelInfo.entries) {
       const { year, conjunto } = parseVideoTitle(video.title, conjuntos);
 
       if (!year || !conjunto) {
-        logger.info(
-          "Missing year or conjunto information, adding to ignored list"
-        );
         const ignored = await fs.readJson(trackingFiles.ignored);
         ignored.push({
           url: video.url,

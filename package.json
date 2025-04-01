@@ -1,12 +1,11 @@
 {
-  "name": "carnavul-downloader",
+  "name": "carnavul",
   "version": "1.0.0",
-  "description": "YouTube video downloader for carnival performances with specific categorization rules",
-  "main": "src/index.js",
+  "description": "Download and organize carnival videos from YouTube",
   "type": "module",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node src/index.js"
   },
   "keywords": [
     "youtube",
@@ -17,10 +16,10 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "youtube-dl-exec": "^2.5.6",
-    "commander": "^12.0.0",
-    "winston": "^3.11.0",
+    "commander": "^11.1.0",
+    "dayjs": "^1.11.10",
     "fs-extra": "^11.2.0",
-    "dayjs": "^1.11.10"
+    "winston": "^3.12.0",
+    "youtube-dl-exec": "^2.5.7"
   }
 }
