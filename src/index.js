@@ -26,14 +26,20 @@ const logger = createLogger({
 
 // Generate NFO file content
 const generateNfoContent = (videoInfo, conjunto, year) => {
+  const title =
+    videoInfo.isAlternativeFormat && videoInfo.round
+      ? `${conjunto.name} ${year} - ${videoInfo.round}`
+      : `${conjunto.name} ${year}`;
+
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
 <movie>
-    <title>${conjunto.name} ${year}</title>
+    <title>${title}</title>
     <originaltitle>${videoInfo.title}</originaltitle>
     <sorttitle>${conjunto.name} ${year}</sorttitle>
     <year>${year}</year>
     <genre>Carnival</genre>
     <genre>${conjunto.category}</genre>
+    ${videoInfo.round ? `<genre>${videoInfo.round}</genre>` : ""}
     <plot>${videoInfo.description || ""}</plot>
     <source>YouTube</source>
     <dateadded>${new Date().toISOString()}</dateadded>
@@ -70,6 +76,7 @@ const initTrackingFiles = async (baseDir) => {
     downloaded: path.join(trackingDir, "downloaded.txt"),
     checkLater: path.join(trackingDir, "check_later.json"),
     ignored: path.join(trackingDir, "ignored.json"),
+    incomplete: path.join(trackingDir, "incomplete.json"),
     failed: path.join(trackingDir, "failed.json"),
   };
 
@@ -144,6 +151,31 @@ const calculateSimilarity = (str1, str2) => {
 const parseVideoTitle = (title, conjuntos) => {
   logger.info(`Parsing video title: ${title}`);
 
+  // First try to parse the alternative format (4ta Etapa 2020 - Cayo La Cabra - Primera Rueda)
+  const alternativeFormatRegex =
+    /(\d+(?:ta|ma)) Etapa (\d{4}) - (.+?) - (Primera Rueda|Segunda Rueda|Liguilla)/i;
+  const alternativeMatch = title.match(alternativeFormatRegex);
+
+  if (alternativeMatch) {
+    const [_, etapa, year, name, round] = alternativeMatch;
+    // Find conjunto by name
+    for (const [category, names] of Object.entries(conjuntos)) {
+      const normalizedName = normalizeString(name);
+      const conjunto = names.find((n) => {
+        const similarity = calculateSimilarity(name, n);
+        return similarity > 0.85;
+      });
+      if (conjunto) {
+        return {
+          year,
+          conjunto: { name: conjunto, category },
+          round, // Store the round information
+          isAlternativeFormat: true,
+        };
+      }
+    }
+  }
+
   // Extract year (19XX or 20XX)
   const yearMatch = title.match(/\b(19|20)\d{2}\b/);
   const year = yearMatch ? yearMatch[0] : null;
@@ -193,17 +225,26 @@ const shouldDownload = (videoInfo) => {
   logger.info(`Video duration: ${duration} seconds`);
 
   const durationMinutes = parseInt(duration) / 60;
+  const titleLower = title.toLowerCase();
+
+  // Competition round format should always download
+  const roundMatch =
+    /(\d+(?:ta|ma)) Etapa .+ (Primera Rueda|Segunda Rueda|Liguilla)/i.test(
+      title
+    );
+  if (roundMatch) {
+    logger.info("Video is a competition round, will download");
+    return true;
+  }
 
   if (durationMinutes < 30) {
     logger.info("Video too short, skipping");
     return false;
   }
 
-  const hasActuacionCompleta = title
-    .toLowerCase()
-    .includes("actuacion completa");
-  const hasFragmento = title.toLowerCase().includes("fragmento");
-  const hasResumen = title.toLowerCase().includes("resumen");
+  const hasActuacionCompleta = titleLower.includes("actuacion completa");
+  const hasFragmento = titleLower.includes("fragmento");
+  const hasResumen = titleLower.includes("resumen");
 
   logger.info(
     `Title conditions: actuacion completa: ${hasActuacionCompleta}, fragmento: ${hasFragmento}, resumen: ${hasResumen}`
@@ -260,9 +301,16 @@ const downloadVideo = async (
   logger.info(`Output path: ${outputPath}`);
 
   try {
-    // Create clean filename
     const baseDir = path.dirname(outputPath);
-    const cleanName = `${conjunto.name} ${year}`;
+
+    // Generate filename based on format
+    let cleanName;
+    if (videoInfo.isAlternativeFormat && videoInfo.round) {
+      cleanName = `${conjunto.name} ${year} - ${videoInfo.round}`;
+    } else {
+      cleanName = `${conjunto.name} ${year}`;
+    }
+
     const outputTemplate = path.join(baseDir, cleanName + ".%(ext)s");
 
     const command =
@@ -415,6 +463,109 @@ const processChannel = async (
   }
 };
 
+// Process videos from check_later.json
+const processCheckLater = async (baseDir, trackingFilesPath = null) => {
+  logger.info("Starting check_later.json processing");
+  logger.info(`Base directory: ${baseDir}`);
+
+  const startTime = Date.now();
+  const stats = {
+    downloaded: 0,
+    ignored: 0,
+    incomplete: 0,
+    failed: 0,
+    totalSize: 0,
+    categories: {},
+  };
+
+  try {
+    const conjuntos = await loadConfig();
+    const trackingFiles = await initTrackingFiles(trackingFilesPath || baseDir);
+
+    // Read check_later.json
+    const checkLaterPath = path.join(baseDir, ".tracking", "check_later.json");
+    const checkLater = await fs.readJson(checkLaterPath);
+    const newCheckLater = [];
+
+    logger.info(`Found ${checkLater.length} videos in check_later.json`);
+
+    for (const video of checkLater) {
+      if (!video.download) {
+        // Move to incomplete.json if no download property
+        const incomplete = await fs.readJson(trackingFiles.incomplete);
+        incomplete.push({
+          ...video,
+          reason: "No download property set in check_later.json",
+        });
+        await fs.writeJson(trackingFiles.incomplete, incomplete);
+        stats.incomplete++;
+        continue;
+      }
+
+      // Process video for download since it has download: true
+      const { year, conjunto } = parseVideoTitle(video.title, conjuntos);
+
+      if (!year || !conjunto) {
+        // Move to ignored if we can't parse the title
+        const ignored = await fs.readJson(trackingFiles.ignored);
+        ignored.push({
+          ...video,
+          reason: `Could not identify ${
+            !year ? "year" : "conjunto name"
+          } in title`,
+        });
+        await fs.writeJson(trackingFiles.ignored, ignored);
+        stats.ignored++;
+        continue;
+      }
+
+      const outputDir = path.join(baseDir, year, conjunto.category);
+      await fs.ensureDir(outputDir);
+      logger.info(`Created output directory: ${outputDir}`);
+
+      const outputPath = path.join(outputDir, `${conjunto.name} ${year}`);
+
+      const success = await downloadVideo(
+        video.url,
+        outputPath,
+        trackingFiles,
+        video,
+        conjunto,
+        year
+      );
+
+      if (success) {
+        stats.downloaded++;
+        stats.categories[conjunto.category] =
+          (stats.categories[conjunto.category] || 0) + 1;
+        logger.info("Download successful");
+      } else {
+        stats.failed++;
+        logger.info("Download failed");
+      }
+    }
+
+    // Save the updated check_later.json without the processed videos
+    await fs.writeJson(checkLaterPath, newCheckLater, { spaces: 2 });
+
+    const report = {
+      ...stats,
+      duration: (Date.now() - startTime) / 1000,
+      timestamp: new Date().toISOString(),
+    };
+
+    const reportPath = path.join(baseDir, "check_later_report.json");
+    await fs.writeJson(reportPath, report, { spaces: 2 });
+    logger.info(`Report generated at ${reportPath}`);
+    logger.info("Processing completed", report);
+
+    return report;
+  } catch (error) {
+    logger.error("Check later processing failed", { error: error.message });
+    throw error;
+  }
+};
+
 // CLI setup
 const program = new Command();
 
@@ -422,30 +573,54 @@ program
   .name("carnavul-downloader")
   .description("Download and organize carnival videos from YouTube")
   .version("1.0.0")
-  .requiredOption("-c, --channel <url>", "YouTube channel URL")
+  .option("-c, --channel <url>", "YouTube channel URL")
   .requiredOption("-d, --directory <path>", "Base directory for downloads")
   .option("-t, --tracking <path>", "Override path for tracking files")
   .action(async (options) => {
     try {
       logger.info("Starting Carnavul Downloader");
-      const report = await processChannel(
-        options.channel,
-        options.directory,
-        options.tracking
-      );
-      console.log("\nDownload Summary:");
-      console.log("----------------");
-      console.log(`Videos downloaded: ${report.downloaded}`);
-      console.log(`Videos for later review: ${report.checkLater}`);
-      console.log(`Videos ignored: ${report.ignored}`);
-      console.log(`Failed downloads: ${report.failed}`);
-      console.log("\nCategory Distribution:");
-      Object.entries(report.categories).forEach(([category, count]) => {
-        console.log(`${category}: ${count}`);
-      });
-      console.log(
-        `\nTotal processing time: ${report.duration.toFixed(2)} seconds`
-      );
+
+      if (options.channel) {
+        // Process channel as before
+        const report = await processChannel(
+          options.channel,
+          options.directory,
+          options.tracking
+        );
+        console.log("\nDownload Summary:");
+        console.log("----------------");
+        console.log(`Videos downloaded: ${report.downloaded}`);
+        console.log(`Videos for later review: ${report.checkLater}`);
+        console.log(`Videos ignored: ${report.ignored}`);
+        console.log(`Failed downloads: ${report.failed}`);
+        console.log("\nCategory Distribution:");
+        Object.entries(report.categories).forEach(([category, count]) => {
+          console.log(`${category}: ${count}`);
+        });
+        console.log(
+          `\nTotal processing time: ${report.duration.toFixed(2)} seconds`
+        );
+      } else {
+        // Process check_later.json
+        logger.info("No channel URL provided, processing check_later.json");
+        const report = await processCheckLater(
+          options.directory,
+          options.tracking
+        );
+        console.log("\nCheck Later Processing Summary:");
+        console.log("-----------------------------");
+        console.log(`Videos downloaded: ${report.downloaded}`);
+        console.log(`Videos moved to incomplete: ${report.incomplete}`);
+        console.log(`Videos ignored (invalid title): ${report.ignored}`);
+        console.log(`Failed downloads: ${report.failed}`);
+        console.log("\nCategory Distribution:");
+        Object.entries(report.categories).forEach(([category, count]) => {
+          console.log(`${category}: ${count}`);
+        });
+        console.log(
+          `\nTotal processing time: ${report.duration.toFixed(2)} seconds`
+        );
+      }
     } catch (error) {
       logger.error("Error:", error.message);
       process.exit(1);
