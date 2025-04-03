@@ -589,51 +589,70 @@ const processSingleVideo = async (
     const trackingFiles = await initTrackingFiles(trackingFilesPath || baseDir);
 
     logger.info("Fetching video information...");
-    const video = await youtubeDl(videoUrl, {
+    const videoInfo = await youtubeDl(videoUrl, {
       dumpSingleJson: true,
+      noCheckCertificates: true,
+      noWarnings: true,
+      preferFreeFormats: true,
     });
 
-    const { year, conjunto } = parseVideoTitle(video.title, conjuntos);
+    const { year, conjunto } = parseVideoTitle(videoInfo.title, conjuntos);
 
     if (!year || !conjunto) {
       const ignored = await fs.readJson(trackingFiles.ignored);
       ignored.push({
-        url: video.url,
-        title: video.title,
+        url: videoUrl,
+        title: videoInfo.title,
         reason: `Could not identify ${
           !year ? "year" : "conjunto name"
-        } in title: "${video.title}"`,
+        } in title: "${videoInfo.title}"`,
         metadata: {
           yearFound: year || null,
           conjuntoFound: conjunto?.name || null,
-          normalizedTitle: normalizeString(video.title),
+          normalizedTitle: normalizeString(videoInfo.title),
         },
       });
       await fs.writeJson(trackingFiles.ignored, ignored);
       stats.ignored++;
       logger.info("Video ignored due to unidentifiable year or conjunto");
-      return stats;
+
+      return {
+        ...stats,
+        duration: (Date.now() - startTime) / 1000,
+        timestamp: new Date().toISOString(),
+        status: "ignored",
+        reason: `Could not identify ${
+          !year ? "year" : "conjunto name"
+        } in title`,
+      };
     }
 
-    if (!shouldDownload(video)) {
+    if (!shouldDownload(videoInfo)) {
       const checkLater = await fs.readJson(trackingFiles.checkLater);
       checkLater.push({
-        url: video.url,
-        title: video.title,
-        reason: `Video duration: ${video.duration}s. Must be >30min or contain 'actuacion completa' or ('fragmento' and year < 2005). Title cannot contain 'RESUMEN'`,
+        url: videoUrl,
+        title: videoInfo.title,
+        reason: `Video duration: ${videoInfo.duration}s. Must be >30min or contain 'actuacion completa' or ('fragmento' and year < 2005). Title cannot contain 'RESUMEN'`,
         metadata: {
-          duration: video.duration,
-          hasActuacionCompleta: video.title
+          duration: videoInfo.duration,
+          hasActuacionCompleta: videoInfo.title
             .toLowerCase()
             .includes("actuacion completa"),
-          hasFragmento: video.title.toLowerCase().includes("fragmento"),
-          hasResumen: video.title.toUpperCase().includes("RESUMEN"),
+          hasFragmento: videoInfo.title.toLowerCase().includes("fragmento"),
+          hasResumen: videoInfo.title.toUpperCase().includes("RESUMEN"),
           year: year,
         },
       });
       await fs.writeJson(trackingFiles.checkLater, checkLater);
       logger.info("Video added to check_later list");
-      return stats;
+
+      return {
+        ...stats,
+        duration: (Date.now() - startTime) / 1000,
+        timestamp: new Date().toISOString(),
+        status: "check_later",
+        reason: "Does not meet download criteria",
+      };
     }
 
     const outputDir = path.join(baseDir, year, conjunto.category);
@@ -643,10 +662,10 @@ const processSingleVideo = async (
     const outputPath = path.join(outputDir, `${conjunto.name} ${year}`);
 
     const success = await downloadVideo(
-      video.url,
+      videoUrl,
       outputPath,
       trackingFiles,
-      video,
+      videoInfo,
       conjunto,
       year
     );
@@ -665,6 +684,7 @@ const processSingleVideo = async (
       ...stats,
       duration: (Date.now() - startTime) / 1000,
       timestamp: new Date().toISOString(),
+      status: success ? "success" : "failed",
     };
 
     const reportPath = path.join(baseDir, "single_video_report.json");
@@ -675,7 +695,13 @@ const processSingleVideo = async (
     return report;
   } catch (error) {
     logger.error("Single video processing failed", { error: error.message });
-    throw error;
+    return {
+      ...stats,
+      duration: (Date.now() - startTime) / 1000,
+      timestamp: new Date().toISOString(),
+      status: "failed",
+      error: error.message,
+    };
   }
 };
 
@@ -703,16 +729,14 @@ program
         );
         console.log("\nSingle Video Download Summary:");
         console.log("----------------------------");
-        console.log(
-          `Download status: ${
-            report.downloaded
-              ? "Success"
-              : report.ignored
-              ? "Ignored"
-              : "Failed"
-          }`
-        );
-        if (report.categories) {
+        console.log(`Status: ${report.status}`);
+        if (report.error) {
+          console.log(`Error: ${report.error}`);
+        }
+        if (report.reason) {
+          console.log(`Reason: ${report.reason}`);
+        }
+        if (Object.keys(report.categories).length > 0) {
           console.log("\nCategory:");
           Object.entries(report.categories).forEach(([category, count]) => {
             console.log(`${category}: ${count}`);
