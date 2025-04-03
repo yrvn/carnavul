@@ -225,7 +225,7 @@ const shouldDownload = (videoInfo) => {
   logger.info(`Video duration: ${duration} seconds`);
 
   const durationMinutes = parseInt(duration) / 60;
-  const titleLower = title.toLowerCase();
+  const normalizedTitle = normalizeString(title);
 
   // Competition round format should always download
   const roundMatch =
@@ -242,9 +242,9 @@ const shouldDownload = (videoInfo) => {
     return false;
   }
 
-  const hasActuacionCompleta = titleLower.includes("actuacion completa");
-  const hasFragmento = titleLower.includes("fragmento");
-  const hasResumen = titleLower.includes("resumen");
+  const hasActuacionCompleta = normalizedTitle.includes("actuacioncompleta");
+  const hasFragmento = normalizedTitle.includes("fragmento");
+  const hasResumen = normalizedTitle.includes("resumen");
 
   logger.info(
     `Title conditions: actuacion completa: ${hasActuacionCompleta}, fragmento: ${hasFragmento}, resumen: ${hasResumen}`
