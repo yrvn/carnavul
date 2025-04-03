@@ -566,6 +566,119 @@ const processCheckLater = async (baseDir, trackingFilesPath = null) => {
   }
 };
 
+// Process a single video URL
+const processSingleVideo = async (
+  videoUrl,
+  baseDir,
+  trackingFilesPath = null
+) => {
+  logger.info("Starting single video processing");
+  logger.info(`Video URL: ${videoUrl}`);
+  logger.info(`Base directory: ${baseDir}`);
+
+  const startTime = Date.now();
+  const stats = {
+    downloaded: 0,
+    ignored: 0,
+    failed: 0,
+    categories: {},
+  };
+
+  try {
+    const conjuntos = await loadConfig();
+    const trackingFiles = await initTrackingFiles(trackingFilesPath || baseDir);
+
+    logger.info("Fetching video information...");
+    const video = await youtubeDl(videoUrl, {
+      dumpSingleJson: true,
+    });
+
+    const { year, conjunto } = parseVideoTitle(video.title, conjuntos);
+
+    if (!year || !conjunto) {
+      const ignored = await fs.readJson(trackingFiles.ignored);
+      ignored.push({
+        url: video.url,
+        title: video.title,
+        reason: `Could not identify ${
+          !year ? "year" : "conjunto name"
+        } in title: "${video.title}"`,
+        metadata: {
+          yearFound: year || null,
+          conjuntoFound: conjunto?.name || null,
+          normalizedTitle: normalizeString(video.title),
+        },
+      });
+      await fs.writeJson(trackingFiles.ignored, ignored);
+      stats.ignored++;
+      logger.info("Video ignored due to unidentifiable year or conjunto");
+      return stats;
+    }
+
+    if (!shouldDownload(video)) {
+      const checkLater = await fs.readJson(trackingFiles.checkLater);
+      checkLater.push({
+        url: video.url,
+        title: video.title,
+        reason: `Video duration: ${video.duration}s. Must be >30min or contain 'actuacion completa' or ('fragmento' and year < 2005). Title cannot contain 'RESUMEN'`,
+        metadata: {
+          duration: video.duration,
+          hasActuacionCompleta: video.title
+            .toLowerCase()
+            .includes("actuacion completa"),
+          hasFragmento: video.title.toLowerCase().includes("fragmento"),
+          hasResumen: video.title.toUpperCase().includes("RESUMEN"),
+          year: year,
+        },
+      });
+      await fs.writeJson(trackingFiles.checkLater, checkLater);
+      logger.info("Video added to check_later list");
+      return stats;
+    }
+
+    const outputDir = path.join(baseDir, year, conjunto.category);
+    await fs.ensureDir(outputDir);
+    logger.info(`Created output directory: ${outputDir}`);
+
+    const outputPath = path.join(outputDir, `${conjunto.name} ${year}`);
+
+    const success = await downloadVideo(
+      video.url,
+      outputPath,
+      trackingFiles,
+      video,
+      conjunto,
+      year
+    );
+
+    if (success) {
+      stats.downloaded++;
+      stats.categories[conjunto.category] =
+        (stats.categories[conjunto.category] || 0) + 1;
+      logger.info("Download successful");
+    } else {
+      stats.failed++;
+      logger.info("Download failed");
+    }
+
+    const report = {
+      ...stats,
+      duration: (Date.now() - startTime) / 1000,
+      timestamp: new Date().toISOString(),
+    };
+
+    const reportPath = path.join(baseDir, "single_video_report.json");
+    await fs.writeJson(reportPath, report, { spaces: 2 });
+    logger.info(`Report generated at ${reportPath}`);
+    logger.info("Processing completed", report);
+
+    return report;
+  } catch (error) {
+    logger.error("Single video processing failed", { error: error.message });
+    throw error;
+  }
+};
+
 // CLI setup
 const program = new Command();
 
@@ -574,13 +687,41 @@ program
   .description("Download and organize carnival videos from YouTube")
   .version("1.0.0")
   .option("-c, --channel <url>", "YouTube channel URL")
+  .option("-v, --video <url>", "Single YouTube video URL")
   .requiredOption("-d, --directory <path>", "Base directory for downloads")
   .option("-t, --tracking <path>", "Override path for tracking files")
   .action(async (options) => {
     try {
       logger.info("Starting Carnavul Downloader");
 
-      if (options.channel) {
+      if (options.video) {
+        // Process single video
+        const report = await processSingleVideo(
+          options.video,
+          options.directory,
+          options.tracking
+        );
+        console.log("\nSingle Video Download Summary:");
+        console.log("----------------------------");
+        console.log(
+          `Download status: ${
+            report.downloaded
+              ? "Success"
+              : report.ignored
+              ? "Ignored"
+              : "Failed"
+          }`
+        );
+        if (report.categories) {
+          console.log("\nCategory:");
+          Object.entries(report.categories).forEach(([category, count]) => {
+            console.log(`${category}: ${count}`);
+          });
+        }
+        console.log(
+          `\nTotal processing time: ${report.duration.toFixed(2)} seconds`
+        );
+      } else if (options.channel) {
         // Process channel as before
         const report = await processChannel(
           options.channel,
