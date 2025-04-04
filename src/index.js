@@ -265,7 +265,7 @@ const shouldDownload = (videoInfo) => {
 
   // Competition round format should always download
   const roundMatch =
-    /(\d+(?:ta|ma|A)) Etapa .+ (Primera Rueda|Segunda Rueda|Liguilla)|.+ Liguilla(?:\s+Carnaval)?\s+\d{4}/i.test(
+    /(?:(?:\d+(?:ta|ma|A)) Etapa .+|.+) (?:Primera Rueda|Segunda Rueda|Liguilla)(?:\s+Carnaval)?\s+\d{4}/i.test(
       title
     );
   if (roundMatch) {
