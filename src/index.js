@@ -151,6 +151,16 @@ const calculateSimilarity = (str1, str2) => {
 const parseVideoTitle = (title, conjuntos) => {
   logger.info(`Parsing video title: ${title}`);
 
+  // Skip certain types of videos
+  const normalizedTitle = normalizeString(title);
+  if (
+    normalizedTitle.includes("pruebadeadmision") ||
+    normalizedTitle.includes("desfile") ||
+    normalizedTitle.includes("llamadas")
+  ) {
+    return { year: null, conjunto: null };
+  }
+
   // First try to parse the alternative format (4ta Etapa 2020 - Cayo La Cabra - Primera Rueda)
   const alternativeFormatRegex =
     /(\d+(?:ta|ma)) Etapa (\d{4}) - (.+?) - (Primera Rueda|Segunda Rueda|Liguilla)/i;
@@ -172,6 +182,32 @@ const parseVideoTitle = (title, conjuntos) => {
           round, // Store the round information
           isAlternativeFormat: true,
         };
+      }
+    }
+  }
+
+  // Check for 2015 format ([1-6]A ETAPA [CONJUNTO] LIGUILLA)
+  const etapaFormatRegex = /^(\d)A ETAPA (.+?) LIGUILLA$/i;
+  const etapaMatch = title.match(etapaFormatRegex);
+
+  if (etapaMatch) {
+    const [_, etapa, name] = etapaMatch;
+    // Only match if etapa is 1-6
+    if (parseInt(etapa) >= 1 && parseInt(etapa) <= 6) {
+      // Find conjunto by name
+      for (const [category, names] of Object.entries(conjuntos)) {
+        const conjunto = names.find((n) => {
+          const similarity = calculateSimilarity(name, n);
+          return similarity > 0.85;
+        });
+        if (conjunto) {
+          return {
+            year: "2015",
+            conjunto: { name: conjunto, category },
+            round: "Liguilla",
+            isAlternativeFormat: true,
+          };
+        }
       }
     }
   }
