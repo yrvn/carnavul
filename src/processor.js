@@ -4,7 +4,6 @@ import youtubeDl from "youtube-dl-exec";
 import { parseVideoTitle } from "./parser.js";
 import { shouldDownload, downloadVideo } from "./downloader.js";
 import {
-  addToDownloaded,
   readTrackingJson,
   writeTrackingJson,
   addTrackingEntry,
