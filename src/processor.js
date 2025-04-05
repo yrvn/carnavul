@@ -41,13 +41,15 @@ export async function processChannel(
 
   try {
     // Get channel info and video list (flat)
+    logger.debug(`Fetching flat playlist info for channel: ${channelUrl}`);
     const channelInfo = await youtubeDl(channelUrl, {
       dumpSingleJson: true,
       noWarnings: true,
       noCallHome: true,
-      extractFlat: "in_playlist", // Get basic info for videos in the playlist
+      flatPlaylist: true, // Get basic info for videos in the playlist
       playlistReverse: true, // Process oldest first
     });
+    logger.debug(`Flat playlist info fetched for channel: ${channelUrl}`);
 
     if (!channelInfo.entries || channelInfo.entries.length === 0) {
       logger.warn(`No video entries found for channel ${channelUrl}`);
@@ -216,6 +218,7 @@ export async function processChannel(
     } // End loop through videos
   } catch (error) {
     logger.error("Failed to process channel", {
+      channelUrl: channelUrl, // Add context
       error: error.message,
       stack: error.stack,
     });
