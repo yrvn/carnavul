@@ -173,13 +173,21 @@ const parseVideoTitle = (title, conjuntos) => {
       const normalizedName = normalizeString(name);
       const conjunto = names.find((n) => {
         const similarity = calculateSimilarity(name, n);
+        logger.debug(
+          `Comparing (Alternative Format) "${name}" with "${n}": Similarity=${similarity.toFixed(
+            2
+          )}`
+        );
         return similarity > 0.85;
       });
       if (conjunto) {
+        logger.info(
+          `Found conjunto (Alternative Format): ${conjunto} in category: ${category}`
+        );
         return {
           year,
           conjunto: { name: conjunto, category },
-          round, // Store the round information
+          round,
           isAlternativeFormat: true,
         };
       }
@@ -187,28 +195,41 @@ const parseVideoTitle = (title, conjuntos) => {
   }
 
   // Check for 2015 format ([1-6]A ETAPA [CONJUNTO] LIGUILLA)
-  const etapaFormatRegex = /^(\d)A ETAPA (.+?) LIGUILLA$/i;
-  const etapaMatch = title.match(etapaFormatRegex);
+  const etapa2015FormatRegex = /^(\d)A ETAPA (.+?) LIGUILLA$/i;
+  const etapa2015Match = title.match(etapa2015FormatRegex);
 
-  if (etapaMatch) {
-    const [_, etapa, name] = etapaMatch;
+  if (etapa2015Match) {
+    const [_, etapa, name] = etapa2015Match;
+    logger.info(`Matched 2015 Liguilla format. Etapa: ${etapa}, Name: ${name}`);
+
     // Only match if etapa is 1-6
     if (parseInt(etapa) >= 1 && parseInt(etapa) <= 6) {
       // Find conjunto by name
       for (const [category, names] of Object.entries(conjuntos)) {
-        const conjunto = names.find((n) => {
-          const similarity = calculateSimilarity(name, n);
-          return similarity > 0.85;
-        });
-        if (conjunto) {
-          return {
-            year: "2015",
-            conjunto: { name: conjunto, category },
-            round: "Liguilla",
-            isAlternativeFormat: true,
-          };
+        for (const n of names) {
+          const similarity = calculateSimilarity(name.trim(), n);
+          logger.debug(
+            `Comparing (2015 Format) "${name.trim()}" with "${n}": Similarity=${similarity.toFixed(
+              2
+            )}`
+          );
+
+          if (similarity > 0.85) {
+            logger.info(
+              `Found conjunto (2015 Format): ${n} in category: ${category}`
+            );
+            return {
+              year: "2015",
+              conjunto: { name: n, category },
+              round: "Liguilla",
+              isAlternativeFormat: true,
+            };
+          }
         }
       }
+      logger.warn(
+        `Matched 2015 Liguilla format but couldn't find conjunto for name: ${name}`
+      );
     }
   }
 
@@ -229,8 +250,14 @@ const parseVideoTitle = (title, conjuntos) => {
   for (const [category, groupList] of Object.entries(conjuntos)) {
     for (const conjunto of groupList) {
       const similarity = calculateSimilarity(title, conjunto);
+      logger.debug(
+        `Comparing (General) "${title}" with "${conjunto}": Similarity=${similarity.toFixed(
+          2
+        )}`
+      );
 
-      if (similarity > 0.85 && similarity > bestMatchScore) {
+      const requiredSimilarity = year ? 0.85 : 0.9;
+      if (similarity >= requiredSimilarity && similarity > bestMatchScore) {
         foundConjunto = {
           name: conjunto,
           category,
@@ -243,10 +270,18 @@ const parseVideoTitle = (title, conjuntos) => {
 
   if (foundConjunto) {
     logger.info(
-      `Found conjunto: ${foundConjunto.name} in category: ${
+      `Found conjunto (General): ${foundConjunto.name} in category: ${
         foundConjunto.category
       } (similarity: ${foundConjunto.similarity.toFixed(2)})`
     );
+
+    // If we found a conjunto but no year, ignore the match
+    if (!year) {
+      logger.warn(
+        `Found conjunto (General) ${foundConjunto.name} but no year in standard check. Ignoring match...`
+      );
+      return { year: null, conjunto: null };
+    }
   } else {
     logger.info("No conjunto found in title");
   }
@@ -265,9 +300,10 @@ const shouldDownload = (videoInfo) => {
 
   // Competition round format should always download
   const roundMatch =
-    /(?:(?:\d+(?:ta|ma|A)) Etapa .+|.+) (?:Primera Rueda|Segunda Rueda|Liguilla)(?:\s+Carnaval)?\s+\d{4}/i.test(
+    /(\d+(?:ta|ma|A)) Etapa .+ (Primera Rueda|Segunda Rueda|Liguilla)|.+ (Primera Rueda|Segunda Rueda|Liguilla)(?:\s+Carnaval)?\s+\d{4}|^\d+A ETAPA .+ LIGUILLA$/i.test(
       title
     );
+
   if (roundMatch) {
     logger.info("Video is a competition round, will download");
     return true;
@@ -755,8 +791,10 @@ program
   .action(async (options) => {
     try {
       logger.info("Starting Carnavul Downloader");
+      logger.info(`Provided options: ${JSON.stringify(options)}`);
 
       if (options.video) {
+        logger.info(`Processing single video: ${options.video}`);
         // Process single video
         const report = await processSingleVideo(
           options.video,
@@ -782,6 +820,7 @@ program
           `\nTotal processing time: ${report.duration.toFixed(2)} seconds`
         );
       } else if (options.channel) {
+        logger.info(`Processing channel: ${options.channel}`);
         // Process channel as before
         const report = await processChannel(
           options.channel,
@@ -803,7 +842,9 @@ program
         );
       } else {
         // Process check_later.json
-        logger.info("No channel URL provided, processing check_later.json");
+        logger.info(
+          "No channel or video URL provided, processing check_later.json"
+        );
         const report = await processCheckLater(
           options.directory,
           options.tracking
@@ -823,7 +864,7 @@ program
         );
       }
     } catch (error) {
-      logger.error("Error:", error.message);
+      logger.error("Unhandled error in main execution:", error);
       process.exit(1);
     }
   });
