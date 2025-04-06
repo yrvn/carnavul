@@ -137,7 +137,7 @@ export function generateNfoContent(videoInfo, conjunto, year, round = null) {
         case "&":
           return "&";
         case "'":
-          return "&apos;";
+          return "&apos;"; // Correct character literal for single quote, correct XML entity
         case '"':
           return '"';
         default:
@@ -196,7 +196,7 @@ export function downloadVideo(
   );
 
   return new Promise((resolve, reject) => {
-    // *** Validation Logic from previous correct version ***
+    // Validation Logic
     // 1. Check essential nfoData components first
     if (!nfoData || !nfoData.videoInfo || !nfoData.conjunto || !nfoData.year) {
       logger.error(
@@ -234,7 +234,7 @@ export function downloadVideo(
         `[downloadVideo] Initial videoId parameter ('${videoIdParam}') differs from metadata ID ('${videoId}'). Using metadata ID.`
       );
     }
-    // *** END Validation Logic ***
+    // END Validation Logic
 
     logger.info(
       `Starting download process for video ${videoId}: ${
@@ -249,8 +249,8 @@ export function downloadVideo(
       outputTemplate,
       "--write-info-json", // Write metadata to a .info.json file
       "--no-write-playlist-metafiles",
-      "--no-progress",
-      "--verbose", // Add verbose flag to get more detailed output from yt-dlp
+      // "--no-progress", // REMOVED this line to re-enable progress bar
+      "--verbose", // Keep verbose for detailed logs if needed
       "--format",
       "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best", // Prefer mp4 up to 1080p
       "--download-archive", // Flag to use archive file
@@ -271,8 +271,13 @@ export function downloadVideo(
     ytDlp.stdout.on("data", (data) => {
       const line = data.toString().trim();
       if (line) {
+        // Log progress lines at info level to make them visible by default
+        if (line.startsWith("[download]")) {
+          logger.info(`yt-dlp progress: ${line}`); // Changed back to info
+        } else {
+          logger.debug(`yt-dlp stdout: ${line}`); // Keep other stdout at debug
+        }
         stdoutData += line + "\n";
-        logger.debug(`yt-dlp stdout: ${line}`); // Keep logging stdout lines
       }
     });
 
