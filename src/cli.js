@@ -68,10 +68,9 @@ async function run() {
       "Set logging level (e.g., info, debug, error)",
       "info"
     )
-    // *** ADDED OPTION ***
     .option(
       "--year <yyyy>",
-      "Manually specify the year for all videos processed in a channel/playlist run",
+      "Manually specify the year. For --channel, forces year for all videos. For --video, used as fallback if title parsing fails.", // Updated description
       validateYear // Add validation
     );
 
@@ -98,9 +97,9 @@ async function run() {
       );
 
       // Determine action
+      const forcedYear = options.year || null; // Get the year option
+
       if (options.channel) {
-        // *** PASS YEAR OPTION ***
-        const forcedYear = options.year || null; // Pass null if not provided
         if (forcedYear) {
           logger.info(
             `Action: Processing Channel - ${options.channel} (Forcing Year: ${forcedYear})`
@@ -127,25 +126,24 @@ async function run() {
         );
         console.log(`Processed: ${stats.processed}`);
         console.log(` -> Downloaded/Archived: ${stats.downloaded}`);
-        console.log(` -> Ignored (No Match/Year): ${stats.ignored_no_match}`); // Updated label slightly
+        console.log(` -> Ignored (No Match/Year): ${stats.ignored_no_match}`);
         console.log(` -> Marked for Check Later: ${stats.checkLater}`);
         console.log(` -> Failed: ${stats.failed}`);
         console.log("---------------------------");
       } else if (options.video) {
-        // Year option typically doesn't apply to single videos, but log if provided
-        if (options.year) {
-          logger.warn(
-            "The --year option is ignored when processing a single video (--video)."
-          );
-        }
+        // Pass the year option to processSingleVideo
         logger.info(`Action: Processing Single Video - ${options.video}`);
+        if (forcedYear) {
+          logger.info(` -> Using --year ${forcedYear} as potential fallback.`);
+        }
         const result = await processSingleVideo(
           options.video,
           baseDir,
           trackingFiles,
           config,
           downloadedSet,
-          logger
+          logger,
+          forcedYear // Pass the forced year here
         );
         logger.info("Video processing completed.", { result });
         console.log("\nSingle Video Processing Summary:");
@@ -156,10 +154,10 @@ async function run() {
         if (result.error) console.log(`Error: ${result.error}`);
         console.log("-----------------------------");
       } else if (options.checkLater) {
-        // Year option typically doesn't apply here either
+        // Year option remains ignored for check-later as data should be in the JSON file
         if (options.year) {
           logger.warn(
-            "The --year option is ignored when processing the check later list (--check-later)."
+            "The --year option is ignored when processing the check later list (--check-later). Year information should be in check_later.json if needed."
           );
         }
         logger.info("Action: Processing Check Later list");

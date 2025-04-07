@@ -95,7 +95,8 @@ export async function processChannel(
               `Forced year ${forcedYear} overrides year ${parsedInfo.year} found in title "${videoStub.title}".`
             );
           } else if (!parsedInfo.year) {
-            logger.debug(
+            logger.info(
+              // Changed to info level
               `Using forced year ${forcedYear} as no year was found in title "${videoStub.title}".`
             );
           }
@@ -107,9 +108,8 @@ export async function processChannel(
         if (!effectiveYear || !parsedInfo.conjunto) {
           let reason = "Could not identify ";
           if (!effectiveYear && !parsedInfo.conjunto)
-            reason += "year (and no forced year provided) or conjunto";
-          else if (!effectiveYear)
-            reason += "year (and no forced year provided)";
+            reason += "year (or forced year) or conjunto";
+          else if (!effectiveYear) reason += "year (or forced year)";
           else reason += "conjunto";
           reason += ` in title: "${videoStub.title}"`;
 
@@ -120,6 +120,7 @@ export async function processChannel(
             url: videoStub.url, // Use URL from stub
             reason: reason,
             parsedInfo: parsedInfo, // Include what was parsed
+            forcedYear: forcedYear, // Log if a forced year was attempted
           });
           stats.ignored_no_match++;
           continue;
@@ -272,9 +273,6 @@ export async function processChannel(
   return stats;
 }
 
-// --- processSingleVideo and processCheckLater remain unchanged ---
-// They don't use the --year option.
-
 /**
  * Process a single YouTube video
  * @param {string} videoUrl - URL of the video to process
@@ -283,6 +281,7 @@ export async function processChannel(
  * @param {Object} config - Configuration object
  * @param {Set} downloadedSet - Set of already downloaded video IDs
  * @param {Object} logger - Logger instance
+ * @param {string | null} forcedYear - Year provided via CLI option, or null (Passed from cli.js)
  * @returns {Promise<Object>} Processing result { status: string, reason?: string, path?: string, error?: string }
  */
 export async function processSingleVideo(
@@ -291,9 +290,13 @@ export async function processSingleVideo(
   trackingFiles,
   config,
   downloadedSet, // Keep for initial check
-  logger
+  logger,
+  forcedYear = null // Accept forcedYear from CLI
 ) {
   logger.info(`Processing single video: ${videoUrl}`);
+  if (forcedYear) {
+    logger.info(`--year option provided: ${forcedYear}`);
+  }
   let videoInfo; // Declare here to use in catch block if needed
 
   try {
@@ -318,11 +321,34 @@ export async function processSingleVideo(
 
     // 3. Parse video title
     const parsedInfo = parseVideoTitle(videoInfo.title, config);
-    if (!parsedInfo.year || !parsedInfo.conjunto) {
+
+    // *** MODIFIED YEAR LOGIC FOR SINGLE VIDEO ***
+    let effectiveYear = parsedInfo.year;
+    if (!effectiveYear && forcedYear) {
+      logger.info(
+        `Using provided --year ${forcedYear} as fallback since title parsing did not find a year.`
+      );
+      effectiveYear = forcedYear;
+    } else if (
+      parsedInfo.year &&
+      forcedYear &&
+      parsedInfo.year !== forcedYear
+    ) {
+      logger.warn(
+        `Year ${parsedInfo.year} found in title overrides provided --year ${forcedYear}. Use --channel to force override for multiple videos.`
+      );
+      // Keep the year from the title for single video processing unless it was missing
+    } else if (!parsedInfo.year && !forcedYear) {
+      logger.info("No year found in title and --year option not provided.");
+    }
+    // *** END MODIFIED YEAR LOGIC ***
+
+    // 4. Check if we have an effective year and a conjunto
+    if (!effectiveYear || !parsedInfo.conjunto) {
       let reason = "Could not identify ";
-      if (!parsedInfo.year && !parsedInfo.conjunto)
-        reason += "year or conjunto";
-      else if (!parsedInfo.year) reason += "year";
+      if (!effectiveYear && !parsedInfo.conjunto)
+        reason += "year (or provided --year) or conjunto";
+      else if (!effectiveYear) reason += "year (or provided --year)";
       else reason += "conjunto";
       reason += ` in title: "${videoInfo.title}"`;
 
@@ -333,6 +359,7 @@ export async function processSingleVideo(
         url: videoUrl,
         reason: reason,
         parsedInfo: parsedInfo,
+        forcedYearAttempted: forcedYear, // Log if year was provided
       });
       return {
         status: "ignored",
@@ -340,14 +367,14 @@ export async function processSingleVideo(
       };
     }
     logger.info(
-      `Parsed title: Year=${parsedInfo.year}, Conjunto=${
+      `Processing with: Year=${effectiveYear}, Conjunto=${
         parsedInfo.conjunto.name
       }, Category=${parsedInfo.conjunto.category}${
         parsedInfo.round ? `, Round=${parsedInfo.round}` : ""
       }`
     );
 
-    // 4. Check if video should be downloaded
+    // 5. Check if video should be downloaded
     const downloadDecision = shouldDownload(videoInfo, parsedInfo, logger);
     if (!downloadDecision.download) {
       logger.info(
@@ -359,27 +386,28 @@ export async function processSingleVideo(
         url: videoUrl,
         reason: downloadDecision.reason,
         conjunto: parsedInfo.conjunto,
-        year: parsedInfo.year,
+        year: effectiveYear, // Use effective year
         round: parsedInfo.round,
         duration: videoInfo.duration,
       });
       return { status: "check_later", reason: downloadDecision.reason };
     }
 
-    // 5. Prepare for download
+    // 6. Prepare for download
     const outputDir = path.join(
       baseDir,
-      parsedInfo.year,
+      effectiveYear, // Use effective year
       parsedInfo.conjunto.category
     );
     await fs.ensureDir(outputDir);
 
-    const baseFilename = `${parsedInfo.conjunto.name} ${parsedInfo.year}${
+    const baseFilename = `${parsedInfo.conjunto.name} ${effectiveYear}${
+      // Use effective year
       parsedInfo.round ? ` - ${parsedInfo.round}` : ""
     }`;
     const expectedNfoPath = path.join(outputDir, baseFilename + ".nfo"); // For reporting
 
-    // 6. Download video
+    // 7. Download video
     let success = false;
     try {
       success = await downloadVideo(
@@ -391,7 +419,7 @@ export async function processSingleVideo(
           // NFO data
           videoInfo,
           conjunto: parsedInfo.conjunto,
-          year: parsedInfo.year,
+          year: effectiveYear, // Use effective year
           round: parsedInfo.round,
         },
         trackingFiles.downloadedPath, // Pass archive path
@@ -412,7 +440,7 @@ export async function processSingleVideo(
           url: videoUrl,
           error: "downloadVideo returned false (likely yt-dlp exec error)",
           conjunto: parsedInfo.conjunto,
-          year: parsedInfo.year,
+          year: effectiveYear, // Use effective year
           round: parsedInfo.round,
         });
         return {
@@ -435,7 +463,7 @@ export async function processSingleVideo(
         url: videoUrl,
         error: `Download function error: ${error.message}`,
         conjunto: parsedInfo.conjunto,
-        year: parsedInfo.year,
+        year: effectiveYear, // Use effective year
         round: parsedInfo.round,
       });
       return { status: "failed", error: error.message };
@@ -453,6 +481,7 @@ export async function processSingleVideo(
       title: videoInfo?.title || "Unknown Title",
       url: videoUrl,
       error: `Processing error: ${error.message}`,
+      forcedYearAttempted: forcedYear,
     };
     await addTrackingEntry(trackingFiles.failedPath, errorData);
     return { status: "failed", error: `Processing error: ${error.message}` };
@@ -475,6 +504,9 @@ export async function processCheckLater(
   downloadedSet, // Keep for initial check
   logger
 ) {
+  // --- processCheckLater remains unchanged ---
+  // The --year flag is not relevant here as data should come from the
+  // check_later.json entry or re-parsing the title.
   logger.info("Processing check_later list");
 
   const stats = {
@@ -543,12 +575,32 @@ export async function processCheckLater(
         );
 
         // Re-parse title to ensure we have correct info (could have been manually fixed)
+        // Also check the 'year' field in the item itself as a potential manual override
         const parsedInfo = parseVideoTitle(videoInfo.title, config);
-        if (!parsedInfo.year || !parsedInfo.conjunto) {
+        let effectiveYear = parsedInfo.year;
+
+        // *** Prioritize year from check_later.json item if present ***
+        if (item.year) {
+          if (parsedInfo.year && parsedInfo.year !== String(item.year)) {
+            logger.warn(
+              `Year ${item.year} from check_later.json overrides year ${parsedInfo.year} found in current title "${videoInfo.title}". Using ${item.year}.`
+            );
+          } else if (!parsedInfo.year) {
+            logger.info(
+              `Using year ${item.year} provided in check_later.json item.`
+            );
+          }
+          effectiveYear = String(item.year); // Ensure it's a string
+        }
+        // *** End check_later.json year logic ***
+
+        if (!effectiveYear || !parsedInfo.conjunto) {
+          // Check effectiveYear now
           let reason = "Could not identify ";
-          if (!parsedInfo.year && !parsedInfo.conjunto)
-            reason += "year or conjunto";
-          else if (!parsedInfo.year) reason += "year";
+          if (!effectiveYear && !parsedInfo.conjunto)
+            reason += "year (from title or check_later item) or conjunto";
+          else if (!effectiveYear)
+            reason += "year (from title or check_later item)";
           else reason += "conjunto";
           reason += ` in title (re-check): "${videoInfo.title}"`;
 
@@ -563,7 +615,8 @@ export async function processCheckLater(
           continue; // Don't add back to remainingCheckLater
         }
         logger.info(
-          `Parsed title: Year=${parsedInfo.year}, Conjunto=${
+          `Processing with: Year=${effectiveYear}, Conjunto=${
+            // Use effectiveYear
             parsedInfo.conjunto.name
           }, Category=${parsedInfo.conjunto.category}${
             parsedInfo.round ? `, Round=${parsedInfo.round}` : ""
@@ -575,12 +628,13 @@ export async function processCheckLater(
 
         const outputDir = path.join(
           baseDir,
-          parsedInfo.year,
+          effectiveYear, // Use effectiveYear
           parsedInfo.conjunto.category
         );
         await fs.ensureDir(outputDir);
 
-        const baseFilename = `${parsedInfo.conjunto.name} ${parsedInfo.year}${
+        const baseFilename = `${parsedInfo.conjunto.name} ${effectiveYear}${
+          // Use effectiveYear
           parsedInfo.round ? ` - ${parsedInfo.round}` : ""
         }`;
 
@@ -595,7 +649,7 @@ export async function processCheckLater(
               // NFO data
               videoInfo,
               conjunto: parsedInfo.conjunto,
-              year: parsedInfo.year,
+              year: effectiveYear, // Use effectiveYear
               round: parsedInfo.round,
             },
             trackingFiles.downloadedPath, // Pass archive path
@@ -615,6 +669,7 @@ export async function processCheckLater(
               ...item,
               error: `Check_later processing error: downloadVideo returned false (likely yt-dlp exec error)`,
               currentTitle: videoInfo.title,
+              effectiveYearUsed: effectiveYear, // Log year used
             });
             // Don't add back to remainingCheckLater
           }
@@ -632,6 +687,7 @@ export async function processCheckLater(
             ...item,
             error: `Check_later processing error: ${error.message}`,
             currentTitle: videoInfo.title,
+            effectiveYearUsed: effectiveYear, // Log year used
           });
           // Don't add back to remainingCheckLater
         }
