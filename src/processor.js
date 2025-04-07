@@ -2,6 +2,7 @@ import fs from "fs-extra";
 import path from "path";
 import youtubeDl from "youtube-dl-exec";
 import { parseVideoTitle } from "./parser.js";
+// Use the execSync version of downloadVideo
 import { shouldDownload, downloadVideo } from "./downloader.js";
 import {
   readTrackingJson,
@@ -10,13 +11,14 @@ import {
 } from "./state.js";
 
 /**
- * Process a YouTube channel
- * @param {string} channelUrl - URL of the channel to process
+ * Process a YouTube channel or playlist
+ * @param {string} channelUrl - URL of the channel/playlist
  * @param {string} baseDir - Base directory for downloads
  * @param {Object} trackingFiles - Object containing paths to tracking files
  * @param {Object} config - Configuration object
  * @param {Set} downloadedSet - Set of already downloaded video IDs (from archive file)
  * @param {Object} logger - Logger instance
+ * @param {string | null} forcedYear - Year provided via CLI option, or null
  * @returns {Promise<Object>} Processing statistics
  */
 export async function processChannel(
@@ -25,9 +27,13 @@ export async function processChannel(
   trackingFiles,
   config,
   downloadedSet, // Keep for initial skip check
-  logger
+  logger,
+  forcedYear = null // Added parameter
 ) {
-  logger.info(`Processing channel: ${channelUrl}`);
+  logger.info(`Processing channel/playlist: ${channelUrl}`);
+  if (forcedYear) {
+    logger.info(`Using forced year for all videos: ${forcedYear}`);
+  }
 
   const stats = {
     total: 0,
@@ -41,7 +47,7 @@ export async function processChannel(
 
   try {
     // Get channel info and video list (flat)
-    logger.debug(`Fetching flat playlist info for channel: ${channelUrl}`);
+    logger.debug(`Fetching flat playlist info for: ${channelUrl}`);
     const channelInfo = await youtubeDl(channelUrl, {
       dumpSingleJson: true,
       noWarnings: true,
@@ -49,19 +55,20 @@ export async function processChannel(
       flatPlaylist: true, // Get basic info for videos in the playlist
       playlistReverse: true, // Process oldest first
     });
-    logger.debug(`Flat playlist info fetched for channel: ${channelUrl}`);
+    logger.debug(`Flat playlist info fetched for: ${channelUrl}`);
 
     if (!channelInfo.entries || channelInfo.entries.length === 0) {
-      logger.warn(`No video entries found for channel ${channelUrl}`);
+      logger.warn(`No video entries found for ${channelUrl}`);
       return stats;
     }
 
-    logger.info(`Found ${channelInfo.entries.length} videos in channel`);
+    logger.info(
+      `Found ${channelInfo.entries.length} videos in channel/playlist`
+    );
     stats.total = channelInfo.entries.length;
 
     for (const videoStub of channelInfo.entries) {
       // Basic check: Skip if already in the initially loaded downloadedSet
-      // yt-dlp --download-archive will handle the definitive check later
       if (downloadedSet.has(videoStub.id)) {
         logger.debug(
           `Video ${videoStub.id} (${videoStub.title}) found in initial downloaded set, skipping.`
@@ -75,36 +82,60 @@ export async function processChannel(
         `Processing video ${stats.processed}/${stats.total}: ${videoStub.title} (ID: ${videoStub.id})`
       );
 
+      let videoInfo; // To store full metadata if needed
       try {
         // 1. Parse video title from the stub
         const parsedInfo = parseVideoTitle(videoStub.title, config);
-        if (!parsedInfo.year || !parsedInfo.conjunto) {
-          logger.info(
-            `Could not identify year or conjunto for video ${videoStub.id} ('${videoStub.title}'), marking as ignored.`
-          );
+
+        // *** LOGIC FOR FORCED YEAR ***
+        let effectiveYear = parsedInfo.year;
+        if (forcedYear) {
+          if (parsedInfo.year && parsedInfo.year !== forcedYear) {
+            logger.warn(
+              `Forced year ${forcedYear} overrides year ${parsedInfo.year} found in title "${videoStub.title}".`
+            );
+          } else if (!parsedInfo.year) {
+            logger.debug(
+              `Using forced year ${forcedYear} as no year was found in title "${videoStub.title}".`
+            );
+          }
+          effectiveYear = forcedYear; // Use the forced year
+        }
+        // *** END FORCED YEAR LOGIC ***
+
+        // 2. Check if we have an effective year and a conjunto
+        if (!effectiveYear || !parsedInfo.conjunto) {
+          let reason = "Could not identify ";
+          if (!effectiveYear && !parsedInfo.conjunto)
+            reason += "year (and no forced year provided) or conjunto";
+          else if (!effectiveYear)
+            reason += "year (and no forced year provided)";
+          else reason += "conjunto";
+          reason += ` in title: "${videoStub.title}"`;
+
+          logger.info(`${reason}, marking as ignored.`);
           await addTrackingEntry(trackingFiles.ignoredPath, {
             id: videoStub.id,
             title: videoStub.title,
             url: videoStub.url, // Use URL from stub
-            reason: `Could not identify ${
-              !parsedInfo.year ? "year" : "conjunto"
-            } in title`,
+            reason: reason,
             parsedInfo: parsedInfo, // Include what was parsed
           });
           stats.ignored_no_match++;
           continue;
         }
+
         logger.info(
-          `Parsed title: Year=${parsedInfo.year}, Conjunto=${
+          `Processing with: Year=${effectiveYear}, Conjunto=${
             parsedInfo.conjunto.name
           }, Category=${parsedInfo.conjunto.category}${
             parsedInfo.round ? `, Round=${parsedInfo.round}` : ""
           }`
         );
 
-        // 2. Get full video info (needed for duration check and NFO)
+        // 3. Get full video info (needed for duration check and NFO)
         logger.debug(`Fetching full metadata for ${videoStub.id}...`);
-        const videoInfo = await youtubeDl(videoStub.url, {
+        videoInfo = await youtubeDl(videoStub.url, {
           dumpSingleJson: true,
           noWarnings: true,
           noCallHome: true,
@@ -113,7 +144,8 @@ export async function processChannel(
           `Full metadata fetched for ${videoStub.id}. Duration: ${videoInfo.duration}s`
         );
 
-        // 3. Check if video should be downloaded based on full info
+        // 4. Check if video should be downloaded based on full info
+        // Pass effectiveYear to shouldDownload if it needs it (currently it doesn't directly use it, but parsedInfo might)
         const downloadDecision = shouldDownload(videoInfo, parsedInfo, logger);
         if (!downloadDecision.download) {
           logger.info(
@@ -125,7 +157,7 @@ export async function processChannel(
             url: videoStub.url,
             reason: downloadDecision.reason,
             conjunto: parsedInfo.conjunto,
-            year: parsedInfo.year,
+            year: effectiveYear, // Use effective year
             round: parsedInfo.round,
             duration: videoInfo.duration, // Add duration for context
           });
@@ -133,21 +165,25 @@ export async function processChannel(
           continue;
         }
 
-        // 4. Prepare for download
+        // 5. Prepare for download
         const outputDir = path.join(
           baseDir,
-          parsedInfo.year,
+          effectiveYear, // Use effective year
           parsedInfo.conjunto.category
         );
         await fs.ensureDir(outputDir);
 
-        const baseFilename = `${parsedInfo.conjunto.name} ${parsedInfo.year}${
+        const baseFilename = `${parsedInfo.conjunto.name} ${effectiveYear}${
+          // Use effective year
           parsedInfo.round ? ` - ${parsedInfo.round}` : ""
         }`;
 
-        // 5. Download video (downloader handles archive check and NFO)
+        // 6. Download video (using execSync version)
+        let success = false;
         try {
-          const success = await downloadVideo(
+          // downloadVideo now returns boolean and throws on critical failure before NFO
+          success = await downloadVideo(
+            // Use await since it's async now for NFO
             videoStub.url,
             videoStub.id,
             outputDir,
@@ -156,7 +192,7 @@ export async function processChannel(
               // NFO data
               videoInfo, // Pass full info
               conjunto: parsedInfo.conjunto,
-              year: parsedInfo.year,
+              year: effectiveYear, // Use effective year
               round: parsedInfo.round,
             },
             trackingFiles.downloadedPath, // Pass archive path
@@ -164,38 +200,43 @@ export async function processChannel(
           );
 
           if (success) {
-            // Note: yt-dlp handles adding to archive, no need for addToDownloaded here
+            // Note: yt-dlp handles adding to archive via --download-archive
             stats.downloaded++;
             logger.info(`Successfully processed video ${videoStub.id}`);
           } else {
-            // This case should ideally not be reached if downloadVideo rejects on error
+            // This case happens if downloadVideo catches an execSync error and returns false
             logger.warn(
-              `downloadVideo returned false for ${videoStub.id}, marking as failed.`
+              `downloadVideo indicated failure for ${videoStub.id}, marking as failed.`
             );
             stats.failed++;
+            // Add to failed log (downloadVideo already logs the error)
             await addTrackingEntry(trackingFiles.failedPath, {
               id: videoStub.id,
               title: videoInfo.title,
               url: videoStub.url,
-              error: "downloadVideo returned false",
+              error: "downloadVideo returned false (likely yt-dlp exec error)",
               conjunto: parsedInfo.conjunto,
-              year: parsedInfo.year,
+              year: effectiveYear,
               round: parsedInfo.round,
             });
           }
         } catch (error) {
-          logger.error(`Failed to download/process video ${videoStub.id}`, {
-            error: error.message,
-          });
+          // Catch errors thrown by downloadVideo (e.g., validation errors before execSync)
+          logger.error(
+            `Failed to process video ${videoStub.id} due to error in downloadVideo function`,
+            {
+              error: error.message,
+              stack: error.stack,
+            }
+          );
           stats.failed++;
-          // Add to failed log even if downloadVideo throws
           await addTrackingEntry(trackingFiles.failedPath, {
             id: videoStub.id,
-            title: videoInfo.title, // Use full title if available
+            title: videoInfo?.title || videoStub.title, // Use fetched title if available
             url: videoStub.url,
-            error: error.message,
+            error: `Download function error: ${error.message}`,
             conjunto: parsedInfo.conjunto,
-            year: parsedInfo.year,
+            year: effectiveYear,
             round: parsedInfo.round,
           });
         }
@@ -205,6 +246,7 @@ export async function processChannel(
           `Error processing video ${videoStub.id} ('${videoStub.title}')`,
           {
             error: error.message,
+            stack: error.stack, // Add stack for better debugging
           }
         );
         stats.failed++;
@@ -217,7 +259,7 @@ export async function processChannel(
       }
     } // End loop through videos
   } catch (error) {
-    logger.error("Failed to process channel", {
+    logger.error("Failed to process channel/playlist", {
       channelUrl: channelUrl, // Add context
       error: error.message,
       stack: error.stack,
@@ -229,6 +271,9 @@ export async function processChannel(
   logger.info("Channel processing finished.", stats);
   return stats;
 }
+
+// --- processSingleVideo and processCheckLater remain unchanged ---
+// They don't use the --year option.
 
 /**
  * Process a single YouTube video
@@ -266,32 +311,32 @@ export async function processSingleVideo(
     // 2. Check if already downloaded (using initial set and yt-dlp archive later)
     if (downloadedSet.has(videoInfo.id)) {
       logger.info(
-        `Video ${videoInfo.id} found in initial downloaded set, skipping.`
+        `Video ${videoInfo.id} found in initial downloaded set, skipping download but will ensure NFO exists.`
       );
-      // We'll still let downloadVideo run to ensure NFO exists
-      // return { status: "skipped", reason: "Already downloaded (initial check)" };
+      // We'll still let downloadVideo run to ensure NFO exists if needed
     }
 
     // 3. Parse video title
     const parsedInfo = parseVideoTitle(videoInfo.title, config);
     if (!parsedInfo.year || !parsedInfo.conjunto) {
-      logger.info(
-        `No year or conjunto found for video ${videoInfo.id}, marking as ignored`
-      );
+      let reason = "Could not identify ";
+      if (!parsedInfo.year && !parsedInfo.conjunto)
+        reason += "year or conjunto";
+      else if (!parsedInfo.year) reason += "year";
+      else reason += "conjunto";
+      reason += ` in title: "${videoInfo.title}"`;
+
+      logger.info(`${reason}, marking as ignored`);
       await addTrackingEntry(trackingFiles.ignoredPath, {
         id: videoInfo.id,
         title: videoInfo.title,
         url: videoUrl,
-        reason: `Could not identify ${
-          !parsedInfo.year ? "year" : "conjunto"
-        } in title`,
+        reason: reason,
         parsedInfo: parsedInfo,
       });
       return {
         status: "ignored",
-        reason: `Could not identify ${
-          !parsedInfo.year ? "year" : "conjunto"
-        } in title`,
+        reason: reason,
       };
     }
     logger.info(
@@ -335,8 +380,9 @@ export async function processSingleVideo(
     const expectedNfoPath = path.join(outputDir, baseFilename + ".nfo"); // For reporting
 
     // 6. Download video
+    let success = false;
     try {
-      await downloadVideo(
+      success = await downloadVideo(
         videoUrl,
         videoInfo.id,
         outputDir,
@@ -352,19 +398,42 @@ export async function processSingleVideo(
         logger
       );
 
-      // No need for addToDownloaded
-      logger.info(`Successfully processed single video ${videoInfo.id}`);
-      return { status: "downloaded", path: expectedNfoPath }; // Report NFO path
+      if (success) {
+        logger.info(`Successfully processed single video ${videoInfo.id}`);
+        return { status: "downloaded", path: expectedNfoPath }; // Report NFO path
+      } else {
+        // Should only happen if downloadVideo catches execSync error
+        logger.error(
+          `downloadVideo returned false for single video ${videoInfo.id}.`
+        );
+        await addTrackingEntry(trackingFiles.failedPath, {
+          id: videoInfo.id,
+          title: videoInfo.title,
+          url: videoUrl,
+          error: "downloadVideo returned false (likely yt-dlp exec error)",
+          conjunto: parsedInfo.conjunto,
+          year: parsedInfo.year,
+          round: parsedInfo.round,
+        });
+        return {
+          status: "failed",
+          error: "yt-dlp execution failed (check logs)",
+        };
+      }
     } catch (error) {
-      logger.error(`Failed to download/process single video ${videoInfo.id}`, {
-        error: error.message,
-      });
-      // Add to failed log
+      // Catch errors thrown by downloadVideo (e.g., validation)
+      logger.error(
+        `Failed to process single video ${videoInfo.id} due to error in downloadVideo function`,
+        {
+          error: error.message,
+          stack: error.stack,
+        }
+      );
       await addTrackingEntry(trackingFiles.failedPath, {
         id: videoInfo.id,
         title: videoInfo.title,
         url: videoUrl,
-        error: error.message,
+        error: `Download function error: ${error.message}`,
         conjunto: parsedInfo.conjunto,
         year: parsedInfo.year,
         round: parsedInfo.round,
@@ -372,27 +441,20 @@ export async function processSingleVideo(
       return { status: "failed", error: error.message };
     }
   } catch (error) {
+    // Catch errors from metadata fetching etc.
     logger.error("Failed to process single video", {
       videoUrl,
       error: error.message,
       stack: error.stack,
     });
-    // Add to failed log if possible (if videoInfo was fetched)
-    if (videoInfo && videoInfo.id) {
-      await addTrackingEntry(trackingFiles.failedPath, {
-        id: videoInfo.id,
-        title: videoInfo.title || "Unknown Title",
-        url: videoUrl,
-        error: `Processing error: ${error.message}`,
-      });
-    } else {
-      await addTrackingEntry(trackingFiles.failedPath, {
-        id: "Unknown ID",
-        title: "Unknown Title",
-        url: videoUrl,
-        error: `Processing error before fetching metadata: ${error.message}`,
-      });
-    }
+    // Add to failed log if possible
+    const errorData = {
+      id: videoInfo?.id || "Unknown ID",
+      title: videoInfo?.title || "Unknown Title",
+      url: videoUrl,
+      error: `Processing error: ${error.message}`,
+    };
+    await addTrackingEntry(trackingFiles.failedPath, errorData);
     return { status: "failed", error: `Processing error: ${error.message}` };
   }
 }
@@ -437,8 +499,8 @@ export async function processCheckLater(
       // Ensure item has necessary fields
       if (!item || !item.id || !item.url || !item.title) {
         logger.warn("Skipping invalid item in check_later.json:", item);
-        remainingCheckLater.push(item); // Keep invalid items? Or discard? Let's keep for now.
-        stats.incomplete_no_download_flag++; // Use this category for invalid items too
+        remainingCheckLater.push(item); // Keep invalid items
+        stats.incomplete_no_download_flag++;
         continue;
       }
 
@@ -457,7 +519,7 @@ export async function processCheckLater(
         `Processing check_later item ${stats.processed}/${stats.total_items}: ${item.title} (ID: ${item.id})`
       );
 
-      // Check if already downloaded
+      // Check if already downloaded (initial check)
       if (downloadedSet.has(item.id)) {
         logger.info(
           `Video ${item.id} already downloaded (initial check), skipping.`
@@ -483,14 +545,17 @@ export async function processCheckLater(
         // Re-parse title to ensure we have correct info (could have been manually fixed)
         const parsedInfo = parseVideoTitle(videoInfo.title, config);
         if (!parsedInfo.year || !parsedInfo.conjunto) {
-          logger.info(
-            `No year or conjunto found for video ${item.id}, marking as ignored`
-          );
+          let reason = "Could not identify ";
+          if (!parsedInfo.year && !parsedInfo.conjunto)
+            reason += "year or conjunto";
+          else if (!parsedInfo.year) reason += "year";
+          else reason += "conjunto";
+          reason += ` in title (re-check): "${videoInfo.title}"`;
+
+          logger.info(`${reason}, marking as ignored`);
           await addTrackingEntry(trackingFiles.ignoredPath, {
             ...item, // Keep original item info
-            reason: `Could not identify ${
-              !parsedInfo.year ? "year" : "conjunto"
-            } in title (re-check)`,
+            reason: reason,
             parsedInfo: parsedInfo,
             currentTitle: videoInfo.title, // Add current title
           });
@@ -519,36 +584,71 @@ export async function processCheckLater(
           parsedInfo.round ? ` - ${parsedInfo.round}` : ""
         }`;
 
-        await downloadVideo(
-          item.url,
-          item.id,
-          outputDir,
-          baseFilename,
-          {
-            // NFO data
-            videoInfo,
-            conjunto: parsedInfo.conjunto,
-            year: parsedInfo.year,
-            round: parsedInfo.round,
-          },
-          trackingFiles.downloadedPath, // Pass archive path
-          logger
-        );
+        let success = false;
+        try {
+          success = await downloadVideo(
+            item.url,
+            item.id,
+            outputDir,
+            baseFilename,
+            {
+              // NFO data
+              videoInfo,
+              conjunto: parsedInfo.conjunto,
+              year: parsedInfo.year,
+              round: parsedInfo.round,
+            },
+            trackingFiles.downloadedPath, // Pass archive path
+            logger
+          );
 
-        // No need for addToDownloaded
-        stats.downloaded++;
-        logger.info(`Successfully processed check_later item ${item.id}`);
-        // Don't add back to remainingCheckLater
+          if (success) {
+            stats.downloaded++;
+            logger.info(`Successfully processed check_later item ${item.id}`);
+            // Don't add back to remainingCheckLater
+          } else {
+            stats.failed++;
+            logger.error(
+              `downloadVideo returned false for check_later item ${item.id}.`
+            );
+            await addTrackingEntry(trackingFiles.failedPath, {
+              ...item,
+              error: `Check_later processing error: downloadVideo returned false (likely yt-dlp exec error)`,
+              currentTitle: videoInfo.title,
+            });
+            // Don't add back to remainingCheckLater
+          }
+        } catch (error) {
+          // Catch errors thrown by downloadVideo (e.g., validation)
+          logger.error(
+            `Failed to process check_later item ${item.id} due to error in downloadVideo function`,
+            {
+              error: error.message,
+              stack: error.stack,
+            }
+          );
+          stats.failed++;
+          await addTrackingEntry(trackingFiles.failedPath, {
+            ...item,
+            error: `Check_later processing error: ${error.message}`,
+            currentTitle: videoInfo.title,
+          });
+          // Don't add back to remainingCheckLater
+        }
       } catch (error) {
-        logger.error(`Failed to process check_later item ${item.id}`, {
-          error: error.message,
-        });
+        // Catch errors during metadata fetch for check_later item
+        logger.error(
+          `Failed to process check_later item ${item.id} during metadata fetch`,
+          {
+            error: error.message,
+            stack: error.stack,
+          }
+        );
         stats.failed++;
         // Add to failed log
         await addTrackingEntry(trackingFiles.failedPath, {
           ...item, // Keep original item info
-          error: `Check_later processing error: ${error.message}`,
-          currentTitle: videoInfo ? videoInfo.title : item.title, // Use fetched title if available
+          error: `Check_later metadata fetch error: ${error.message}`,
         });
         // Don't add back to remainingCheckLater
       }
@@ -567,9 +667,6 @@ export async function processCheckLater(
       error: error.message,
       stack: error.stack,
     });
-    // Depending on where the error occurred, checkLaterItems might be partially processed.
-    // It might be safer to not overwrite check_later.json in case of a read/initial processing error.
-    // However, the current structure catches errors per-item mostly.
     throw error; // Rethrow for CLI
   }
 }

@@ -26,6 +26,17 @@ async function getVersion() {
   }
 }
 
+// Helper function to validate year format
+function validateYear(value) {
+  const year = parseInt(value, 10);
+  if (isNaN(year) || value.length !== 4 || year < 1900 || year > 2100) {
+    throw new Error(
+      `Invalid year format: ${value}. Please provide a 4-digit year (e.g., 2023).`
+    );
+  }
+  return value; // Return the original string value
+}
+
 async function run() {
   const version = await getVersion();
   const program = new Command();
@@ -36,7 +47,7 @@ async function run() {
     .version(version);
 
   program
-    .option("-c, --channel <url>", "Process a YouTube channel URL")
+    .option("-c, --channel <url>", "Process a YouTube channel or playlist URL")
     .option("-v, --video <url>", "Process a single YouTube video URL")
     .option(
       "--check-later",
@@ -56,6 +67,12 @@ async function run() {
       "--log-level <level>",
       "Set logging level (e.g., info, debug, error)",
       "info"
+    )
+    // *** ADDED OPTION ***
+    .option(
+      "--year <yyyy>",
+      "Manually specify the year for all videos processed in a channel/playlist run",
+      validateYear // Add validation
     );
 
   program.action(async (options) => {
@@ -82,14 +99,24 @@ async function run() {
 
       // Determine action
       if (options.channel) {
-        logger.info(`Action: Processing Channel - ${options.channel}`);
+        // *** PASS YEAR OPTION ***
+        const forcedYear = options.year || null; // Pass null if not provided
+        if (forcedYear) {
+          logger.info(
+            `Action: Processing Channel - ${options.channel} (Forcing Year: ${forcedYear})`
+          );
+        } else {
+          logger.info(`Action: Processing Channel - ${options.channel}`);
+        }
+
         const stats = await processChannel(
           options.channel,
           baseDir,
           trackingFiles,
           config,
           downloadedSet,
-          logger
+          logger,
+          forcedYear // Pass the forced year
         );
         logger.info("Channel processing summary:", stats);
         console.log("\nChannel Processing Summary:");
@@ -100,11 +127,17 @@ async function run() {
         );
         console.log(`Processed: ${stats.processed}`);
         console.log(` -> Downloaded/Archived: ${stats.downloaded}`);
-        console.log(` -> Ignored (No Match): ${stats.ignored_no_match}`);
+        console.log(` -> Ignored (No Match/Year): ${stats.ignored_no_match}`); // Updated label slightly
         console.log(` -> Marked for Check Later: ${stats.checkLater}`);
         console.log(` -> Failed: ${stats.failed}`);
         console.log("---------------------------");
       } else if (options.video) {
+        // Year option typically doesn't apply to single videos, but log if provided
+        if (options.year) {
+          logger.warn(
+            "The --year option is ignored when processing a single video (--video)."
+          );
+        }
         logger.info(`Action: Processing Single Video - ${options.video}`);
         const result = await processSingleVideo(
           options.video,
@@ -123,6 +156,12 @@ async function run() {
         if (result.error) console.log(`Error: ${result.error}`);
         console.log("-----------------------------");
       } else if (options.checkLater) {
+        // Year option typically doesn't apply here either
+        if (options.year) {
+          logger.warn(
+            "The --year option is ignored when processing the check later list (--check-later)."
+          );
+        }
         logger.info("Action: Processing Check Later list");
         const stats = await processCheckLater(
           baseDir,
@@ -157,11 +196,17 @@ async function run() {
 
       logger.info("Carnavul Downloader finished.");
     } catch (error) {
-      logger.error("Unhandled error during execution:", {
-        message: error.message,
-        stack: error.stack,
-      });
-      console.error("\nFATAL ERROR:", error.message);
+      // Log specific validation errors from commander/validateYear
+      if (error.code && error.code.startsWith("commander.")) {
+        logger.error(`Command line error: ${error.message}`);
+        console.error(`\nERROR: ${error.message}`);
+      } else {
+        logger.error("Unhandled error during execution:", {
+          message: error.message,
+          stack: error.stack,
+        });
+        console.error("\nFATAL ERROR:", error.message);
+      }
       process.exit(1); // Exit with error code
     }
   });
