@@ -16,7 +16,12 @@ function getRoundPriority(roundName) {
   const normalized = normalizeString(roundName); // Use the same normalization as parser
   if (normalized.includes("liguilla")) return 3;
   if (normalized.includes("segunda") || normalized.includes("2da")) return 2;
-  if (normalized.includes("primera") || normalized.includes("1ra")) return 1;
+  if (
+    normalized.includes("primera") ||
+    normalized.includes("1ra") ||
+    normalized.includes("1era")
+  )
+    return 1; // Added 1era
   return 0; // Unknown round type treated as lowest
 }
 
@@ -45,6 +50,10 @@ export async function processChannel(
   );
   if (forcedYear) {
     logger.info(`Using forced year for all videos: ${forcedYear}`);
+  } else {
+    logger.warn(
+      "Processing channel without --year flag. Titles missing the year will be ignored."
+    ); // Add warning if year is missing
   }
 
   const stats = {
@@ -59,7 +68,7 @@ export async function processChannel(
   };
 
   // Data structure: Map<year, Map<conjuntoName, Array<PotentialVideo>>>
-  // PotentialVideo: { id, url, title, parsedInfo, roundPriority }
+  // PotentialVideo: { id, url, title, parsedInfo: { year, conjunto, round }, roundPriority }
   const potentialVideosMap = new Map();
 
   try {
@@ -71,7 +80,7 @@ export async function processChannel(
       noWarnings: true,
       noCallHome: true,
       flatPlaylist: true,
-      playlistReverse: true,
+      playlistReverse: true, // Consider if reverse is always desired
     });
     logger.debug(`Flat playlist info fetched for: ${channelUrl}`);
 
@@ -96,47 +105,78 @@ export async function processChannel(
         stats.skipped_already_downloaded++;
         continue;
       }
+      // Skip invalid titles early
+      if (
+        !videoStub.title ||
+        videoStub.title.startsWith("[Private video]") ||
+        videoStub.title.startsWith("[Deleted video]")
+      ) {
+        logger.debug(
+          `(${collectionCount}/${stats.total}) Skipping special/invalid title: ${videoStub.title}`
+        );
+        // Optionally add to ignored? For now, just skip collection.
+        continue;
+      }
 
       logger.debug(
         `(${collectionCount}/${stats.total}) Collecting: ${videoStub.title} (ID: ${videoStub.id})`
       );
 
-      // 1. Parse video title from the stub
+      // 1. Parse video title (returns whatever it finds)
       const parsedInfo = parseVideoTitle(videoStub.title, config);
 
-      // 2. Determine effective year using forcedYear if applicable
+      // 2. Determine effective year
       let effectiveYear = parsedInfo.year;
       if (forcedYear) {
-        if (parsedInfo.year && parsedInfo.year !== forcedYear) {
-          // Logged later if this video is chosen, warning is sufficient here if needed
-          // logger.warn(`Forced year ${forcedYear} overrides year ${parsedInfo.year} found in title "${videoStub.title}".`);
+        // Use forced year if no year was parsed
+        if (!parsedInfo.year) {
+          effectiveYear = forcedYear;
         }
-        effectiveYear = forcedYear; // Use the forced year
+        // If year *was* parsed and differs, effectiveYear is still forcedYear,
+        // but we log the override later if this video is chosen.
+        else if (parsedInfo.year !== forcedYear) {
+          effectiveYear = forcedYear; // Override
+        }
       }
 
-      // 3. Check if we have an effective year and a conjunto
-      if (!effectiveYear || !parsedInfo.conjunto) {
-        let reason = "Could not identify ";
-        if (!effectiveYear && !parsedInfo.conjunto)
-          reason += "year (or forced year) or conjunto";
-        else if (!effectiveYear) reason += "year (or forced year)";
-        else reason += "conjunto";
-        reason += ` in title: "${videoStub.title}"`;
+      // *** ADDED DIAGNOSTIC LOG ***
+      // Log the result from the parser AND the calculated effectiveYear right before the check
+      logger.debug(
+        `[Processor Check] Title: "${
+          videoStub.title
+        }" | Parser Output: ${JSON.stringify(
+          parsedInfo
+        )} | Effective Year: ${effectiveYear}`
+      );
 
-        logger.debug(`${reason}, marking as ignored during collection.`); // Debug level might be better here
+      // 3. *** CRUCIAL CHECK ***
+      // Need BOTH a valid `conjunto` from parsing AND an `effectiveYear` (parsed or forced)
+      if (!parsedInfo.conjunto || !effectiveYear) {
+        let reason = "Could not reliably identify ";
+        const missing = [];
+        if (!parsedInfo.conjunto) missing.push("conjunto");
+        if (!effectiveYear) missing.push("year (title or --year flag)");
+        reason += missing.join(" and ");
+        reason += ` for title: "${videoStub.title}"`;
+
+        // Use the more detailed log message from before the check
+        logger.debug(
+          `[Processor Check Failed] ${reason}, marking as ignored during collection.`
+        );
+        // Add to ignored file
         await addTrackingEntry(trackingFiles.ignoredPath, {
           id: videoStub.id,
           title: videoStub.title,
           url: videoStub.url,
           reason: `${reason} (during collection pass)`,
-          parsedInfo: parsedInfo,
-          forcedYear: forcedYear,
+          parsedInfoRaw: parsedInfo, // Log the raw parser output that caused failure
+          forcedYearProvided: forcedYear,
         });
         stats.ignored_no_match++;
-        continue;
+        continue; // Skip collection
       }
 
-      // 4. Store potential video info
+      // 4. Store potential video info (Only reached if check passes)
       const conjuntoName = parsedInfo.conjunto.name;
       const roundPriority = getRoundPriority(parsedInfo.round);
 
@@ -144,7 +184,12 @@ export async function processChannel(
         id: videoStub.id,
         url: videoStub.url,
         title: videoStub.title, // Keep original title from stub for logging
-        parsedInfo: { ...parsedInfo, year: effectiveYear }, // Store effective year
+        // Store the definitive info to be used: effective year, parsed conjunto, parsed round
+        parsedInfo: {
+          year: effectiveYear,
+          conjunto: parsedInfo.conjunto, // Keep the full {name, category} object
+          round: parsedInfo.round,
+        },
         roundPriority: roundPriority,
       };
 
@@ -163,7 +208,8 @@ export async function processChannel(
           parsedInfo.round || "N/A"
         }, Priority: ${roundPriority}) - ID: ${videoStub.id}`
       );
-    }
+    } // End loop through videos
+
     logger.info(
       `Finished Pass 1. Collected potential videos for ${potentialVideosMap.size} year(s).`
     );
@@ -176,7 +222,7 @@ export async function processChannel(
 
     for (const [year, yearMap] of potentialVideosMap.entries()) {
       for (const [conjuntoName, videosForConjunto] of yearMap.entries()) {
-        if (videosForConjunto.length === 0) continue; // Should not happen, but safeguard
+        if (videosForConjunto.length === 0) continue;
 
         // Find the video with the highest round priority
         let chosenVideo = videosForConjunto[0];
@@ -184,14 +230,13 @@ export async function processChannel(
           if (videosForConjunto[i].roundPriority > chosenVideo.roundPriority) {
             chosenVideo = videosForConjunto[i];
           }
-          // Optional: Tie-breaking logic (e.g., prefer shorter title, newer upload date?)
-          // For now, the first one encountered with the highest priority wins in case of ties.
+          // Optional: Tie-breaking logic (e.g., prefer non-alternative format?)
         }
 
         processedCount++;
-        stats.processed++; // Increment processed count for the *chosen* video attempt
+        stats.processed++;
         logger.info(
-          `(${processedCount}) Processing chosen video for ${conjuntoName} ${year}: ${
+          `(${processedCount}) For ${conjuntoName} ${year}, chosen video: ${
             chosenVideo.title
           } (ID: ${chosenVideo.id}, Round: ${
             chosenVideo.parsedInfo.round || "N/A"
@@ -205,41 +250,36 @@ export async function processChannel(
               ` -> Skipping lower priority video: ${video.title} (ID: ${video.id}, Priority: ${video.roundPriority})`
             );
             stats.skipped_lower_round++;
-            // Optionally add to ignored.json with a specific reason
+            // Add to ignored.json
             await addTrackingEntry(trackingFiles.ignoredPath, {
               id: video.id,
               title: video.title,
               url: video.url,
               reason: `Skipped: Lower round priority (${video.roundPriority}) compared to chosen video ${chosenVideo.id} (Priority: ${chosenVideo.roundPriority}) for ${conjuntoName} ${year}`,
-              parsedInfo: video.parsedInfo,
+              parsedInfo: video.parsedInfo, // Log the info associated with the skipped video
             });
           }
         }
 
-        // Now, process the chosenVideo like before (fetch metadata, check download, download)
-        let videoInfo;
+        // Now, process the chosenVideo
+        let videoInfo; // Full metadata
         try {
-          // Warn about forced year override if applicable *now*
+          // Log forced year override only if it actually happened for the chosen video
+          const originalParsedYear = parseVideoTitle(
+            chosenVideo.title,
+            config
+          ).year; // Re-parse original title to get original year
           if (
             forcedYear &&
-            chosenVideo.parsedInfo.year !== forcedYear && // Original parsed year might differ
-            parseVideoTitle(chosenVideo.title, config).year ===
-              chosenVideo.parsedInfo.year // Check if title *actually* had the original year
+            originalParsedYear &&
+            originalParsedYear !== forcedYear
           ) {
             logger.warn(
-              `Forced year ${forcedYear} overrides year ${
-                parseVideoTitle(chosenVideo.title, config).year
-              } found in title "${chosenVideo.title}" for chosen video ${
-                chosenVideo.id
-              }.`
+              `Forced year ${forcedYear} overrides year ${originalParsedYear} found in title "${chosenVideo.title}" for chosen video ${chosenVideo.id}.`
             );
-          } else if (
-            forcedYear &&
-            !parseVideoTitle(chosenVideo.title, config).year
-          ) {
+          } else if (forcedYear && !originalParsedYear) {
             logger.info(
-              // Info level if title had no year
-              `Using forced year ${forcedYear} for chosen video ${chosenVideo.id} as no year was found in title "${chosenVideo.title}".`
+              `Using forced year ${forcedYear} for chosen video ${chosenVideo.id} as no year was found in its title.`
             );
           }
 
@@ -256,9 +296,10 @@ export async function processChannel(
           );
 
           // Check if video should be downloaded based on full info and *chosen* parsed info
+          // Note: chosenVideo.parsedInfo already contains the effectiveYear
           const downloadDecision = shouldDownload(
             videoInfo,
-            chosenVideo.parsedInfo, // Use the parsed info associated with the chosen video
+            chosenVideo.parsedInfo, // Contains { year, conjunto, round }
             logger
           );
 
@@ -268,20 +309,19 @@ export async function processChannel(
             );
             await addTrackingEntry(trackingFiles.checkLaterPath, {
               id: chosenVideo.id,
-              title: videoInfo.title, // Use title from full info
+              title: videoInfo.title,
               url: chosenVideo.url,
               reason: downloadDecision.reason,
-              // Use the effective info from the chosen video's parsed data
-              conjunto: chosenVideo.parsedInfo.conjunto,
+              conjunto: chosenVideo.parsedInfo.conjunto, // Use info from chosenVideo.parsedInfo
               year: chosenVideo.parsedInfo.year,
               round: chosenVideo.parsedInfo.round,
               duration: videoInfo.duration,
             });
             stats.checkLater++;
-            continue; // Move to the next chosen video
+            continue;
           }
 
-          // Prepare for download
+          // Prepare for download using chosenVideo.parsedInfo
           const outputDir = path.join(
             baseDir,
             chosenVideo.parsedInfo.year,
@@ -307,7 +347,7 @@ export async function processChannel(
               baseFilename,
               {
                 // NFO data using chosen video's info
-                videoInfo, // Full fetched metadata
+                videoInfo,
                 conjunto: chosenVideo.parsedInfo.conjunto,
                 year: chosenVideo.parsedInfo.year,
                 round: chosenVideo.parsedInfo.round,
@@ -332,14 +372,12 @@ export async function processChannel(
                 url: chosenVideo.url,
                 error:
                   "downloadVideo returned false (likely yt-dlp exec error)",
-                conjunto: chosenVideo.parsedInfo.conjunto,
-                year: chosenVideo.parsedInfo.year,
-                round: chosenVideo.parsedInfo.round,
+                ...chosenVideo.parsedInfo, // Add year, conjunto, round
               });
             }
           } catch (downloadError) {
             logger.error(
-              `Failed to process chosen video ${chosenVideo.id} due to error in downloadVideo function`,
+              `Failed to process chosen video ${chosenVideo.id} during downloadVideo call`,
               { error: downloadError.message, stack: downloadError.stack }
             );
             stats.failed++;
@@ -348,9 +386,7 @@ export async function processChannel(
               title: videoInfo?.title || chosenVideo.title,
               url: chosenVideo.url,
               error: `Download function error: ${downloadError.message}`,
-              conjunto: chosenVideo.parsedInfo.conjunto,
-              year: chosenVideo.parsedInfo.year,
-              round: chosenVideo.parsedInfo.round,
+              ...chosenVideo.parsedInfo, // Add year, conjunto, round
             });
           }
         } catch (processingError) {
@@ -365,9 +401,7 @@ export async function processChannel(
             title: chosenVideo.title,
             url: chosenVideo.url,
             error: `Processing error (metadata/check): ${processingError.message}`,
-            conjunto: chosenVideo.parsedInfo.conjunto,
-            year: chosenVideo.parsedInfo.year,
-            round: chosenVideo.parsedInfo.round,
+            ...chosenVideo.parsedInfo, // Add year, conjunto, round
           });
         }
       } // End loop through conjuntos for the year
@@ -386,21 +420,34 @@ export async function processChannel(
 
   // Final summary adjustments
   logger.info("Channel processing finished.", stats);
-  // Make sure stats add up reasonably (debug check)
+  // Stats check (optional but helpful)
+  const collectedCount =
+    potentialVideosMap.size > 0
+      ? Array.from(potentialVideosMap.values()).reduce(
+          (sum, yearMap) =>
+            sum +
+            Array.from(yearMap.values()).reduce(
+              (s, vids) => s + vids.length,
+              0
+            ),
+          0
+        )
+      : 0;
   const accountedFor =
-    stats.skipped_already_downloaded +
-    stats.ignored_no_match +
-    stats.skipped_lower_round +
-    stats.processed;
-  if (accountedFor !== stats.total) {
-    logger.warn(
-      `Stats check: Accounted for (${accountedFor}) does not match total videos (${stats.total}). There might be an edge case.`
-    );
-  }
+    stats.skipped_already_downloaded + stats.ignored_no_match + collectedCount;
+  // Note: Total might include private/deleted videos skipped even before ignored_no_match increment. This check is approximate.
+  // if (accountedFor !== stats.total) {
+  //     logger.warn(`Stats check: Accounted for (${accountedFor}) seems different from total videos (${stats.total}). Private/deleted videos might account for difference.`);
+  // }
   const processedAccounted = stats.downloaded + stats.checkLater + stats.failed;
   if (processedAccounted !== stats.processed) {
     logger.warn(
       `Stats check: Processed breakdown (${processedAccounted}) does not match processed total (${stats.processed}).`
+    );
+  }
+  if (stats.processed + stats.skipped_lower_round !== collectedCount) {
+    logger.warn(
+      `Stats check: Processed (${stats.processed}) + Skipped Lower Round (${stats.skipped_lower_round}) does not match total collected (${collectedCount}).`
     );
   }
 
@@ -408,7 +455,7 @@ export async function processChannel(
 }
 
 // --- processSingleVideo ---
-// (No changes needed here, it processes only one specific video)
+// (Remains unchanged)
 export async function processSingleVideo(
   videoUrl,
   baseDir,
@@ -483,7 +530,7 @@ export async function processSingleVideo(
         title: videoInfo.title,
         url: videoUrl,
         reason: reason,
-        parsedInfo: parsedInfo,
+        parsedInfoRaw: parsedInfo, // Log raw parser output
         forcedYearAttempted: forcedYear, // Log if year was provided
       });
       return {
@@ -491,6 +538,7 @@ export async function processSingleVideo(
         reason: reason,
       };
     }
+    // Now we have effectiveYear and parsedInfo.conjunto
     logger.info(
       `Processing with: Year=${effectiveYear}, Conjunto=${
         parsedInfo.conjunto.name
@@ -500,7 +548,19 @@ export async function processSingleVideo(
     );
 
     // 5. Check if video should be downloaded
-    const downloadDecision = shouldDownload(videoInfo, parsedInfo, logger);
+    // Pass the combined info: effective year, parsed conjunto/round
+    const downloadCheckInfo = {
+      year: effectiveYear,
+      conjunto: parsedInfo.conjunto,
+      round: parsedInfo.round,
+      isAlternativeFormat: parsedInfo.isAlternativeFormat, // Pass this too if shouldDownload uses it
+    };
+    const downloadDecision = shouldDownload(
+      videoInfo,
+      downloadCheckInfo,
+      logger
+    );
+
     if (!downloadDecision.download) {
       logger.info(
         `Video ${videoInfo.id} marked for check later: ${downloadDecision.reason}`
@@ -510,9 +570,9 @@ export async function processSingleVideo(
         title: videoInfo.title,
         url: videoUrl,
         reason: downloadDecision.reason,
-        conjunto: parsedInfo.conjunto,
+        conjunto: parsedInfo.conjunto, // Use parsed conjunto
         year: effectiveYear, // Use effective year
-        round: parsedInfo.round,
+        round: parsedInfo.round, // Use parsed round
         duration: videoInfo.duration,
       });
       return { status: "check_later", reason: downloadDecision.reason };
@@ -577,10 +637,7 @@ export async function processSingleVideo(
       // Catch errors thrown by downloadVideo (e.g., validation)
       logger.error(
         `Failed to process single video ${videoInfo.id} due to error in downloadVideo function`,
-        {
-          error: error.message,
-          stack: error.stack,
-        }
+        { error: error.message, stack: error.stack }
       );
       await addTrackingEntry(trackingFiles.failedPath, {
         id: videoInfo.id,
@@ -614,7 +671,7 @@ export async function processSingleVideo(
 }
 
 // --- processCheckLater ---
-// (No changes needed here, it processes based on the check_later.json entry)
+// (Remains unchanged)
 export async function processCheckLater(
   baseDir,
   trackingFiles,
@@ -696,50 +753,99 @@ export async function processCheckLater(
         // Also check the 'year' field in the item itself as a potential manual override
         const parsedInfo = parseVideoTitle(videoInfo.title, config);
         let effectiveYear = parsedInfo.year;
+        let effectiveConjunto = parsedInfo.conjunto;
+        let effectiveRound = parsedInfo.round;
 
-        // *** Prioritize year from check_later.json item if present ***
+        // *** Prioritize data from check_later.json item if present ***
+        let usingCheckLaterData = false;
         if (item.year) {
-          if (parsedInfo.year && parsedInfo.year !== String(item.year)) {
+          const itemYearStr = String(item.year);
+          if (parsedInfo.year && parsedInfo.year !== itemYearStr) {
             logger.warn(
-              `Year ${item.year} from check_later.json overrides year ${parsedInfo.year} found in current title "${videoInfo.title}". Using ${item.year}.`
+              `Year ${itemYearStr} from check_later.json overrides year ${parsedInfo.year} found in current title "${videoInfo.title}". Using ${itemYearStr}.`
             );
           } else if (!parsedInfo.year) {
             logger.info(
-              `Using year ${item.year} provided in check_later.json item.`
+              `Using year ${itemYearStr} provided in check_later.json item.`
             );
           }
-          effectiveYear = String(item.year); // Ensure it's a string
+          effectiveYear = itemYearStr; // Ensure it's a string
+          usingCheckLaterData = true;
         }
-        // *** End check_later.json year logic ***
+        // Allow overriding conjunto via check_later.json? Requires structure { conjunto: { name: "X", category: "Y" }}
+        if (item.conjunto && item.conjunto.name && item.conjunto.category) {
+          if (parsedInfo.conjunto?.name !== item.conjunto.name) {
+            logger.warn(
+              `Conjunto "${item.conjunto.name}" from check_later.json overrides conjunto "${parsedInfo.conjunto?.name}" found in current title. Using "${item.conjunto.name}".`
+            );
+          } else if (!parsedInfo.conjunto) {
+            logger.info(
+              `Using conjunto "${item.conjunto.name}" provided in check_later.json item.`
+            );
+          }
+          effectiveConjunto = item.conjunto;
+          usingCheckLaterData = true;
+        }
+        // Allow overriding round
+        if (typeof item.round === "string") {
+          // Check if round exists (even if empty string)
+          if (parsedInfo.round && parsedInfo.round !== item.round) {
+            logger.warn(
+              `Round "${item.round}" from check_later.json overrides round "${parsedInfo.round}" found in current title. Using "${item.round}".`
+            );
+          } else if (!parsedInfo.round) {
+            logger.info(
+              `Using round "${item.round}" provided in check_later.json item.`
+            );
+          }
+          effectiveRound = item.round;
+          usingCheckLaterData = true;
+        }
+        // *** End check_later.json data logic ***
 
-        if (!effectiveYear || !parsedInfo.conjunto) {
-          // Check effectiveYear now
+        if (!effectiveYear || !effectiveConjunto) {
+          // Check effective info now
           let reason = "Could not identify ";
-          if (!effectiveYear && !parsedInfo.conjunto)
-            reason += "year (from title or check_later item) or conjunto";
+          if (!effectiveYear && !effectiveConjunto)
+            reason += "year or conjunto (from title or check_later item)";
           else if (!effectiveYear)
             reason += "year (from title or check_later item)";
-          else reason += "conjunto";
-          reason += ` in title (re-check): "${videoInfo.title}"`;
+          else reason += "conjunto (from title or check_later item)";
+          reason += ` for title (re-check): "${videoInfo.title}" / check_later item ID: ${item.id}`;
 
           logger.info(`${reason}, marking as ignored`);
           await addTrackingEntry(trackingFiles.ignoredPath, {
             ...item, // Keep original item info
             reason: reason,
-            parsedInfo: parsedInfo,
+            parsedInfoFromTitle: {
+              year: parsedInfo.year,
+              conjuntoName: parsedInfo.conjunto?.name,
+              round: parsedInfo.round,
+            },
             currentTitle: videoInfo.title, // Add current title
           });
           stats.ignored_no_match++;
           continue; // Don't add back to remainingCheckLater
         }
-        logger.info(
-          `Processing with: Year=${effectiveYear}, Conjunto=${
-            // Use effectiveYear
-            parsedInfo.conjunto.name
-          }, Category=${parsedInfo.conjunto.category}${
-            parsedInfo.round ? `, Round=${parsedInfo.round}` : ""
-          }`
-        );
+
+        // Log if we used data from check_later item
+        if (usingCheckLaterData) {
+          logger.info(
+            `Processing check_later item ${
+              item.id
+            } using data from JSON entry (Year: ${effectiveYear}, Conjunto: ${
+              effectiveConjunto.name
+            }, Round: ${effectiveRound || "N/A"})`
+          );
+        } else {
+          logger.info(
+            `Processing check_later item ${
+              item.id
+            } using data parsed from title (Year=${effectiveYear}, Conjunto=${
+              effectiveConjunto.name
+            }, Round=${effectiveRound || "N/A"})`
+          );
+        }
 
         // No need to call shouldDownload again, assuming 'download: true' means intent is clear.
         // Directly proceed to download.
@@ -747,13 +853,13 @@ export async function processCheckLater(
         const outputDir = path.join(
           baseDir,
           effectiveYear, // Use effectiveYear
-          parsedInfo.conjunto.category
+          effectiveConjunto.category // Use effectiveConjunto
         );
         await fs.ensureDir(outputDir);
 
-        const baseFilename = `${parsedInfo.conjunto.name} ${effectiveYear}${
-          // Use effectiveYear
-          parsedInfo.round ? ` - ${parsedInfo.round}` : ""
+        const baseFilename = `${effectiveConjunto.name} ${effectiveYear}${
+          // Use effective info
+          effectiveRound ? ` - ${effectiveRound}` : ""
         }`;
 
         let success = false;
@@ -764,11 +870,11 @@ export async function processCheckLater(
             outputDir,
             baseFilename,
             {
-              // NFO data
+              // NFO data using effective info
               videoInfo,
-              conjunto: parsedInfo.conjunto,
-              year: effectiveYear, // Use effectiveYear
-              round: parsedInfo.round,
+              conjunto: effectiveConjunto,
+              year: effectiveYear,
+              round: effectiveRound,
             },
             trackingFiles.downloadedPath, // Pass archive path
             logger
@@ -787,7 +893,9 @@ export async function processCheckLater(
               ...item,
               error: `Check_later processing error: downloadVideo returned false (likely yt-dlp exec error)`,
               currentTitle: videoInfo.title,
-              effectiveYearUsed: effectiveYear, // Log year used
+              effectiveYearUsed: effectiveYear, // Log effective info used
+              effectiveConjuntoUsed: effectiveConjunto.name,
+              effectiveRoundUsed: effectiveRound,
             });
             // Don't add back to remainingCheckLater
           }
@@ -795,17 +903,16 @@ export async function processCheckLater(
           // Catch errors thrown by downloadVideo (e.g., validation)
           logger.error(
             `Failed to process check_later item ${item.id} due to error in downloadVideo function`,
-            {
-              error: error.message,
-              stack: error.stack,
-            }
+            { error: error.message, stack: error.stack }
           );
           stats.failed++;
           await addTrackingEntry(trackingFiles.failedPath, {
             ...item,
             error: `Check_later processing error: ${error.message}`,
             currentTitle: videoInfo.title,
-            effectiveYearUsed: effectiveYear, // Log year used
+            effectiveYearUsed: effectiveYear, // Log effective info used
+            effectiveConjuntoUsed: effectiveConjunto.name,
+            effectiveRoundUsed: effectiveRound,
           });
           // Don't add back to remainingCheckLater
         }
@@ -813,10 +920,7 @@ export async function processCheckLater(
         // Catch errors during metadata fetch for check_later item
         logger.error(
           `Failed to process check_later item ${item.id} during metadata fetch`,
-          {
-            error: error.message,
-            stack: error.stack,
-          }
+          { error: error.message, stack: error.stack }
         );
         stats.failed++;
         // Add to failed log
