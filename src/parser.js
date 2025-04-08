@@ -1,4 +1,5 @@
 import logger from "./logger.js";
+import { loadConfig } from "./config.js"; // Make sure this is imported if used by testParser
 
 /**
  * Normalize a string by removing accents, spaces, and special characters
@@ -65,227 +66,6 @@ export function calculateSimilarity(str1, str2) {
 }
 
 /**
- * Parse video title to extract year and conjunto information
- * @param {string} title - Video title to parse
- * @param {Object} conjuntos - Configuration object containing conjunto definitions
- * @returns {Object} Parsed information including year, conjunto, round, and format details
- */
-export function parseVideoTitle(title, conjuntos) {
-  if (!title) {
-    logger.warn("Attempted to parse an empty or null title.");
-    return {
-      year: null,
-      conjunto: null,
-      round: null,
-      isAlternativeFormat: false,
-    };
-  }
-  logger.info(`Parsing video title: ${title}`);
-
-  // Skip certain types of videos
-  const normalizedTitleForSkip = normalizeString(title);
-  if (
-    normalizedTitleForSkip.includes("pruebadeadmision") ||
-    normalizedTitleForSkip.includes("desfile") ||
-    normalizedTitleForSkip.includes("llamadas")
-  ) {
-    logger.info(
-      "Skipping video based on title keywords (prueba, desfile, llamadas)"
-    );
-    return {
-      year: null,
-      conjunto: null,
-      round: null,
-      isAlternativeFormat: false,
-    };
-  }
-
-  let year = null;
-  let conjunto = null;
-  let round = null;
-  let isAlternativeFormat = false;
-
-  // Define round keywords and their normalized forms for matching later
-  const roundKeywords = {
-    "Primera Rueda": "primerarueda",
-    "1ra Rueda": "1rarueda", // Add variations
-    "Segunda Rueda": "segundarueda",
-    "2da Rueda": "2darueda",
-    Liguilla: "liguilla",
-  };
-  const normalizedRoundKeywords = Object.values(roundKeywords);
-
-  // --- Try specific formats first ---
-
-  // Alternative format (e.g., "4ta Etapa 2020 - Cayo La Cabra - Primera Rueda")
-  const alternativeFormatRegex =
-    /(\d+(?:ta|ma|ra|da))?\s*Etapa\s*(\d{4})\s*-\s*(.+?)\s*-\s*(.+)/i; // Make etapa optional, capture everything after last '-' as potential round
-  const alternativeMatch = title.match(alternativeFormatRegex);
-
-  if (alternativeMatch) {
-    const [_, etapa, matchedYear, namePart, roundPart] = alternativeMatch;
-    const potentialRound = roundPart.trim();
-    const normalizedPotentialRound = normalizeString(potentialRound);
-
-    // Check if the round part actually matches known round keywords
-    if (
-      normalizedRoundKeywords.some((kw) =>
-        normalizedPotentialRound.includes(kw)
-      )
-    ) {
-      logger.debug(
-        `Matched alternative format - Year: ${matchedYear}, Name: ${namePart.trim()}, Round: ${potentialRound}`
-      );
-      isAlternativeFormat = true;
-      year = matchedYear;
-      round = potentialRound; // Keep original casing for filename/NFO
-
-      // Find conjunto by name part
-      const matchedConjunto = findBestConjuntoMatch(
-        namePart.trim(),
-        conjuntos,
-        0.85,
-        logger,
-        "(Alternative Format)"
-      );
-      if (matchedConjunto) {
-        conjunto = matchedConjunto;
-        logger.info(
-          `Found conjunto (Alternative Format): ${conjunto.name} in category: ${conjunto.category}`
-        );
-        return { year, conjunto, round, isAlternativeFormat };
-      } else {
-        logger.warn(
-          `Matched alternative format but couldn't find conjunto for name: ${namePart.trim()}`
-        );
-        // Fall through to general parsing? Or return partial? Let's return partial for now.
-        return {
-          year: null,
-          conjunto: null,
-          round: null,
-          isAlternativeFormat: false,
-        }; // Treat as failure if conjunto not found
-      }
-    } else {
-      logger.debug(
-        `Matched alternative format regex, but round part "${potentialRound}" doesn't match known rounds. Treating as standard title.`
-      );
-    }
-  }
-
-  // 2015 format (e.g., "1A ETAPA MURGA CAYO LA CABRA LIGUILLA")
-  // Needs careful regex to avoid capturing too much
-  const etapa2015FormatRegex = /^(\d)\s?A?\s?ETAPA\s+(.+?)\s+(LIGUILLA)$/i;
-  const etapa2015Match = title.match(etapa2015FormatRegex);
-
-  if (etapa2015Match) {
-    const [_, etapa, namePart, roundPart] = etapa2015Match;
-    logger.debug(
-      `Matched 2015 Liguilla format. Etapa: ${etapa}, Name: ${namePart}, Round: ${roundPart}`
-    );
-
-    if (parseInt(etapa) >= 1 && parseInt(etapa) <= 6) {
-      isAlternativeFormat = true;
-      year = "2015";
-      round = roundPart.trim(); // Usually "Liguilla"
-
-      const matchedConjunto = findBestConjuntoMatch(
-        namePart.trim(),
-        conjuntos,
-        0.85,
-        logger,
-        "(2015 Format)"
-      );
-      if (matchedConjunto) {
-        conjunto = matchedConjunto;
-        logger.info(
-          `Found conjunto (2015 Format): ${conjunto.name} in category: ${conjunto.category}`
-        );
-        return { year, conjunto, round, isAlternativeFormat };
-      } else {
-        logger.warn(
-          `Matched 2015 Liguilla format but couldn't find conjunto for name: ${namePart.trim()}`
-        );
-        return {
-          year: null,
-          conjunto: null,
-          round: null,
-          isAlternativeFormat: false,
-        }; // Treat as failure
-      }
-    }
-  }
-
-  // --- General Parsing (if specific formats didn't fully match) ---
-
-  // Extract year (19XX or 20XX) - Allow anywhere in the title
-  const yearMatch = title.match(/\b(19[89]\d|20\d{2})\b/); // Match 1980s onwards or 20xx
-  year = yearMatch ? yearMatch[0] : null;
-
-  if (year) {
-    logger.debug(`Found year (General): ${year}`);
-  } else {
-    logger.debug("No year found in title (General)");
-  }
-
-  // Find conjunto name using similarity against the *whole* title
-  conjunto = findBestConjuntoMatch(title, conjuntos, 0.85, logger, "(General)");
-
-  if (conjunto) {
-    logger.debug(
-      `Found conjunto (General): ${conjunto.name} in category: ${conjunto.category}`
-    );
-  } else {
-    logger.debug("No conjunto found with sufficient similarity (General)");
-    // If we didn't find a conjunto, the year doesn't matter much either for our purposes
-    return {
-      year: null,
-      conjunto: null,
-      round: null,
-      isAlternativeFormat: false,
-    };
-  }
-
-  // Extract round from the *whole* title if not found via specific formats
-  if (!round) {
-    const titleLower = title.toLowerCase();
-    if (titleLower.includes("liguilla")) round = "Liguilla";
-    else if (
-      titleLower.includes("segunda rueda") ||
-      titleLower.includes("2da rueda")
-    )
-      round = "Segunda Rueda";
-    else if (
-      titleLower.includes("primera rueda") ||
-      titleLower.includes("1ra rueda")
-    )
-      round = "Primera Rueda";
-
-    if (round) {
-      logger.debug(`Found round (General): ${round}`);
-    } else {
-      logger.debug("No round found in title (General)");
-    }
-  }
-
-  // Return the best information found
-  // We need both year and conjunto to proceed generally
-  if (!year || !conjunto) {
-    logger.info(
-      "Could not reliably identify both year and conjunto from title."
-    );
-    return {
-      year: null,
-      conjunto: null,
-      round: null,
-      isAlternativeFormat: false,
-    };
-  }
-
-  return { year, conjunto, round, isAlternativeFormat };
-}
-
-/**
  * Helper function to find the best matching conjunto name from a title string.
  * @param {string} titlePart - The string (title or part of it) to search within.
  * @param {Object} conjuntos - The configuration object.
@@ -303,18 +83,30 @@ function findBestConjuntoMatch(
 ) {
   let bestMatch = null;
   let bestScore = 0;
+  let bestMatchCandidateName = null; // Store the name that gave the best score
 
   if (!titlePart) return null;
 
+  const normalizedTitlePart = normalizeString(titlePart); // Normalize the search string once
+  // logger.debug(`[findBestConjuntoMatch] ${context} Searching for conjunto matching normalized: "${normalizedTitlePart}" (Original: "${titlePart}")`);
+
   for (const [category, groupList] of Object.entries(conjuntos)) {
     for (const name of groupList) {
-      const similarity = calculateSimilarity(titlePart, name);
-      // Optional: Add more logging for debugging similarity scores
-      // logger.debug(`Comparing ${context} "${titlePart}" with "${name}": Score=${similarity.toFixed(3)}`);
+      const normalizedName = normalizeString(name);
+      const similarity = calculateSimilarity(
+        normalizedTitlePart,
+        normalizedName
+      );
+
+      // Reduce verbosity slightly - only log scores above a lower bound, e.g., 0.5
+      // if (similarity > 0.5) {
+      //     logger.debug(`[findBestConjuntoMatch] ${context} Comparing "${normalizedTitlePart}" with "${normalizedName}" (${name}): Score=${similarity.toFixed(3)}`);
+      // }
+
       if (similarity > bestScore) {
         bestScore = similarity;
+        bestMatchCandidateName = name; // Remember the name for logging
         if (similarity >= threshold) {
-          // Only update bestMatch if above threshold
           bestMatch = { name, category };
         }
       }
@@ -323,19 +115,301 @@ function findBestConjuntoMatch(
 
   if (bestMatch) {
     logger.debug(
-      `Best match ${context}: ${bestMatch.name} (Score: ${bestScore.toFixed(
-        3
-      )})`
+      `[findBestConjuntoMatch] ${context} Found match: ${
+        bestMatch.name
+      } (Score: ${bestScore.toFixed(3)}) >= Threshold ${threshold}`
     );
     return bestMatch;
-  } else if (bestScore > 0.5) {
-    // Log if there was a near miss
-    logger.debug(
-      `No conjunto match ${context} above threshold ${threshold}. Highest score was ${bestScore.toFixed(
-        3
-      )}.`
+  } else {
+    if (bestScore > 0.5) {
+      // Log if there was a near miss
+      logger.debug(
+        `[findBestConjuntoMatch] ${context} No conjunto match found for "${titlePart}". Highest score was ${bestScore.toFixed(
+          3
+        )} for "${bestMatchCandidateName}", below threshold ${threshold}.`
+      );
+    } else {
+      logger.debug(
+        `[findBestConjuntoMatch] ${context} No conjunto match found for "${titlePart}". No potential matches found in config or score too low.`
+      );
+    }
+    return null;
+  }
+}
+
+/**
+ * Parse video title to extract year, conjunto, and round information.
+ * Tries specific formats first, then falls back to general matching.
+ * @param {string} title - Video title to parse
+ * @param {Object} conjuntos - Configuration object containing conjunto definitions
+ * @returns {Object} Parsed info: { year: string|null, conjunto: { name, category }|null, round: string|null, isAlternativeFormat: boolean }
+ */
+export function parseVideoTitle(title, conjuntos) {
+  if (!title || typeof title !== "string") {
+    logger.warn(
+      "[parser] Attempted to parse an empty, null, or non-string title."
     );
+    return {
+      year: null,
+      conjunto: null,
+      round: null,
+      isAlternativeFormat: false,
+    };
+  }
+  // Handle specific non-content titles early
+  if (
+    title.startsWith("[Private video]") ||
+    title.startsWith("[Deleted video]")
+  ) {
+    logger.info(`[parser] Skipping special title: ${title}`);
+    return {
+      year: null,
+      conjunto: null,
+      round: null,
+      isAlternativeFormat: false,
+    };
   }
 
-  return null;
+  logger.info(`[parser] Parsing video title: ${title}`);
+
+  // Skip certain types of videos based on keywords
+  const normalizedTitleForSkip = normalizeString(title);
+  if (
+    normalizedTitleForSkip.includes("pruebadeadmision") ||
+    normalizedTitleForSkip.includes("desfile") ||
+    normalizedTitleForSkip.includes("llamadas")
+  ) {
+    logger.info(
+      "[parser] Skipping video based on title keywords (prueba, desfile, llamadas)"
+    );
+    return {
+      year: null,
+      conjunto: null,
+      round: null,
+      isAlternativeFormat: false,
+    };
+  }
+
+  let year = null;
+  let conjunto = null;
+  let round = null;
+  let isAlternativeFormat = false; // Flag if a specific non-standard format matched
+
+  // Define round keywords and their normalized forms for matching later
+  const roundKeywords = {
+    "Primera Rueda": "primerarueda",
+    "1ra Rueda": "1rarueda", // Add variations
+    "1era Rueda": "1erarueda",
+    "Segunda Rueda": "segundarueda",
+    "2da Rueda": "2darueda",
+    Liguilla: "liguilla",
+  };
+  // Store original casing for display/filename
+  const roundLookup = {};
+  for (const [key, value] of Object.entries(roundKeywords)) {
+    roundLookup[value] = key;
+  }
+  const normalizedRoundKeywords = Object.keys(roundLookup);
+
+  // --- Try specific formats first ---
+  // These formats attempt to parse all components. If successful, we use the result.
+  // If a format matches structure but fails to find a component (like conjunto),
+  // we discard the partial result from that format and allow fallback to general parsing.
+
+  let formatMatched = false; // Track if any specific format regex matched
+
+  // Format: "X Etapa YYYY - Name - Round" (Year present)
+  const format1Regex =
+    /(\d+(?:ta|ma|ra|da))?\s*Etapa\s*(\d{4})\s*-\s*(.+?)\s*-\s*(.+)/i;
+  const format1Match = title.match(format1Regex);
+  if (format1Match) {
+    formatMatched = true;
+    const [_, etapa, matchedYear, namePartRaw, roundPart] = format1Match;
+    const namePart = namePartRaw.trim();
+    const potentialRound = roundPart.trim();
+    const normalizedPotentialRound = normalizeString(potentialRound);
+    const matchedRoundKeyword = normalizedRoundKeywords.find((kw) =>
+      normalizedPotentialRound.includes(kw)
+    );
+
+    if (matchedRoundKeyword) {
+      logger.debug(
+        `[parser] Matched Format 1 Structure (Year Present) - Extracted Name: "${namePart}", Round: "${potentialRound}"`
+      );
+      const currentRound = roundLookup[matchedRoundKeyword];
+      const matchedConjunto = findBestConjuntoMatch(
+        namePart,
+        conjuntos,
+        0.85,
+        logger,
+        "(Format 1)"
+      );
+
+      if (matchedConjunto) {
+        logger.debug(
+          `[parser] Format 1: Successfully parsed all parts. Using this result.`
+        );
+        // Successfully found all parts via this format
+        return {
+          year: matchedYear,
+          conjunto: matchedConjunto,
+          round: currentRound,
+          isAlternativeFormat: true,
+        };
+      } else {
+        logger.debug(
+          `[parser] Format 1: Matched structure but failed to find conjunto for "${namePart}". Discarding partial result, allowing fallback.`
+        );
+        // Don't set component variables, let general parsing try
+      }
+    } else {
+      logger.debug(
+        `[parser] Format 1: Matched structure but round part "${potentialRound}" invalid. Allowing fallback.`
+      );
+    }
+  }
+
+  // Format: "X Etapa - Name - Round" (Year MISSING)
+  // Only try if Format 1 didn't successfully return
+  if (!formatMatched) {
+    const format2Regex = /(\d+(?:ta|ma|ra|da))\s*Etapa\s*-\s*(.+?)\s*-\s*(.+)/i;
+    const format2Match = title.match(format2Regex);
+    if (format2Match) {
+      formatMatched = true;
+      const [_, etapa, namePartRaw, roundPart] = format2Match;
+      const namePart = namePartRaw.trim();
+      const potentialRound = roundPart.trim();
+      const normalizedPotentialRound = normalizeString(potentialRound);
+      const matchedRoundKeyword = normalizedRoundKeywords.find((kw) =>
+        normalizedPotentialRound.includes(kw)
+      );
+
+      if (matchedRoundKeyword) {
+        logger.debug(
+          `[parser] Matched Format 2 Structure (Year Missing) - Extracted Name: "${namePart}", Round: "${potentialRound}"`
+        );
+        const currentRound = roundLookup[matchedRoundKeyword];
+        const matchedConjunto = findBestConjuntoMatch(
+          namePart,
+          conjuntos,
+          0.85,
+          logger,
+          "(Format 2)"
+        );
+
+        if (matchedConjunto) {
+          logger.debug(
+            `[parser] Format 2: Successfully parsed conjunto and round. Year is null. Using this result.`
+          );
+          // Found conjunto and round, year is explicitly null for this format
+          return {
+            year: null,
+            conjunto: matchedConjunto,
+            round: currentRound,
+            isAlternativeFormat: true,
+          };
+        } else {
+          logger.debug(
+            `[parser] Format 2: Matched structure but failed to find conjunto for "${namePart}". Discarding partial result, allowing fallback.`
+          );
+          // Don't set component variables
+        }
+      } else {
+        logger.debug(
+          `[parser] Format 2: Matched structure but round part "${potentialRound}" invalid. Allowing fallback.`
+        );
+      }
+    }
+  }
+
+  // Format: 2015 Liguilla ("XA ETAPA NAME LIGUILLA")
+  // Only try if previous formats didn't successfully return
+  if (!formatMatched) {
+    const etapa2015FormatRegex = /^(\d)\s?A?\s?ETAPA\s+(.+?)\s+(LIGUILLA)$/i;
+    const etapa2015Match = title.match(etapa2015FormatRegex);
+    if (etapa2015Match) {
+      formatMatched = true;
+      const [_, etapa, namePartRaw, roundPart] = etapa2015Match;
+      const namePart = namePartRaw.trim();
+      logger.debug(
+        `[parser] Matched 2015 Liguilla Structure - Extracted Name: "${namePart}"`
+      );
+
+      if (parseInt(etapa) >= 1 && parseInt(etapa) <= 6) {
+        const currentRound = "Liguilla";
+        const matchedConjunto = findBestConjuntoMatch(
+          namePart,
+          conjuntos,
+          0.85,
+          logger,
+          "(2015 Format)"
+        );
+        if (matchedConjunto) {
+          logger.debug(
+            `[parser] 2015 Format: Successfully parsed all parts. Using this result.`
+          );
+          return {
+            year: "2015",
+            conjunto: matchedConjunto,
+            round: currentRound,
+            isAlternativeFormat: true,
+          };
+        } else {
+          logger.debug(
+            `[parser] 2015 Format: Matched structure but failed to find conjunto for "${namePart}". Discarding partial result, allowing fallback.`
+          );
+        }
+      } else {
+        logger.debug(
+          `[parser] 2015 Format: Matched structure but etapa number invalid. Allowing fallback.`
+        );
+      }
+    }
+  }
+
+  // --- General Fallback Parsing ---
+  // This section runs if NO specific format above returned a complete result.
+  // It tries to find year, conjunto, and round independently from the whole title.
+  logger.debug("[parser] Attempting General Fallback Parsing...");
+
+  // Try finding conjunto generally using the whole title
+  conjunto = findBestConjuntoMatch(title, conjuntos, 0.85, logger, "(General)");
+  if (!conjunto) {
+    logger.info("[parser] Fallback failed to find Conjunto.");
+    // If no conjunto found even in fallback, we cannot proceed meaningfully
+    return {
+      year: null,
+      conjunto: null,
+      round: null,
+      isAlternativeFormat: false,
+    };
+  }
+
+  // Try finding year generally
+  const yearMatch = title.match(/\b(19[89]\d|20\d{2})\b/);
+  year = yearMatch ? yearMatch[0] : null;
+  if (!year) {
+    logger.info("[parser] Fallback failed to find Year.");
+    // We might still have a conjunto, but year is required by processor (unless forced)
+  }
+
+  // Try finding round generally
+  const titleLowerNorm = normalizeString(title);
+  const matchedRoundKeyword = normalizedRoundKeywords.find((kw) =>
+    titleLowerNorm.includes(kw)
+  );
+  round = matchedRoundKeyword ? roundLookup[matchedRoundKeyword] : null;
+  if (!round) {
+    logger.debug("[parser] Fallback did not find Round.");
+  }
+
+  logger.info(
+    `[parser] Fallback Result: Year=${year}, Conjunto=${conjunto?.name}, Round=${round}`
+  );
+  // Return the combined result from fallback parsing
+  // isAlternativeFormat remains false because we didn't use a specific format rule here.
+  return { year, conjunto, round, isAlternativeFormat: false };
 }
+
+// Make sure exports are correct
+export { normalizeString, calculateSimilarity, parseVideoTitle };
