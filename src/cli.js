@@ -102,10 +102,12 @@ async function run() {
       if (options.channel) {
         if (forcedYear) {
           logger.info(
-            `Action: Processing Channel - ${options.channel} (Forcing Year: ${forcedYear})`
+            `Action: Processing Channel - ${options.channel} (Forcing Year: ${forcedYear}, Selecting Highest Round)`
           );
         } else {
-          logger.info(`Action: Processing Channel - ${options.channel}`);
+          logger.info(
+            `Action: Processing Channel - ${options.channel} (Selecting Highest Round)`
+          );
         }
 
         const stats = await processChannel(
@@ -118,18 +120,25 @@ async function run() {
           forcedYear // Pass the forced year
         );
         logger.info("Channel processing summary:", stats);
-        console.log("\nChannel Processing Summary:");
-        console.log("---------------------------");
-        console.log(`Total Videos Found: ${stats.total}`);
+        // Updated Summary Output
+        console.log("\nChannel Processing Summary (Highest Round Selection):");
+        console.log("----------------------------------------------------");
+        console.log(`Total Videos Found in Playlist: ${stats.total}`);
         console.log(
           `Skipped (Already Downloaded - Initial Check): ${stats.skipped_already_downloaded}`
         );
-        console.log(`Processed: ${stats.processed}`);
+        console.log(
+          `Ignored (No Match Year/Conjunto - Collection Pass): ${stats.ignored_no_match}`
+        );
+        console.log(
+          `Skipped (Lower Round Priority): ${stats.skipped_lower_round}`
+        );
+        console.log(`----------------------------------------------------`);
+        console.log(`Chosen Videos Processed: ${stats.processed}`);
         console.log(` -> Downloaded/Archived: ${stats.downloaded}`);
-        console.log(` -> Ignored (No Match/Year): ${stats.ignored_no_match}`);
         console.log(` -> Marked for Check Later: ${stats.checkLater}`);
         console.log(` -> Failed: ${stats.failed}`);
-        console.log("---------------------------");
+        console.log("----------------------------------------------------");
       } else if (options.video) {
         // Pass the year option to processSingleVideo
         logger.info(`Action: Processing Single Video - ${options.video}`);
