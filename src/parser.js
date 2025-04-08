@@ -7,7 +7,7 @@ import { loadConfig } from "./config.js"; // Make sure this is imported if used 
  * @returns {string} Normalized string
  */
 export function normalizeString(str) {
-  // Ensure export keyword is present
+  // Exported here
   if (typeof str !== "string") return ""; // Handle non-string input
   return str
     .toLowerCase()
@@ -24,6 +24,7 @@ export function normalizeString(str) {
  * @returns {number} Similarity score between 0 and 1
  */
 export function calculateSimilarity(str1, str2) {
+  // Exported here
   const s1 = normalizeString(str1);
   const s2 = normalizeString(str2);
 
@@ -254,8 +255,6 @@ export function parseVideoTitle(title, conjuntos) {
         conjunto = matchedConjunto;
         round = currentRound;
         isAlternativeFormat = true;
-        // Don't return early, let general parsing check if it finds *more* info? No, specific is better.
-        // return { year, conjunto, round, isAlternativeFormat };
       } else {
         logger.debug(
           `[parser] Format 1: Matched structure but failed to find conjunto for "${namePart}". Discarding partial result, allowing fallback.`
@@ -304,7 +303,6 @@ export function parseVideoTitle(title, conjuntos) {
           conjunto = matchedConjunto;
           round = currentRound;
           isAlternativeFormat = true;
-          // return { year, conjunto, round, isAlternativeFormat };
         } else {
           logger.debug(
             `[parser] Format 2: Matched structure but failed to find conjunto for "${namePart}". Discarding partial result, allowing fallback.`
@@ -348,7 +346,6 @@ export function parseVideoTitle(title, conjuntos) {
           conjunto = matchedConjunto;
           round = currentRound;
           isAlternativeFormat = true;
-          // return { year, conjunto, round, isAlternativeFormat };
         } else {
           logger.debug(
             `[parser] 2015 Format: Matched structure but failed to find conjunto for "${namePart}". Discarding partial result, allowing fallback.`
@@ -381,7 +378,7 @@ export function parseVideoTitle(title, conjuntos) {
       );
       if (!conjunto) {
         logger.info("[parser] Fallback failed to find Conjunto.");
-        // If no conjunto found even in fallback, return failure
+        // If no conjunto found even in fallback, we cannot proceed meaningfully
         return {
           year: null,
           conjunto: null,
@@ -441,6 +438,4 @@ export function parseVideoTitle(title, conjuntos) {
   return { year, conjunto, round, isAlternativeFormat };
 }
 
-// Make sure exports are correct
-// Remove parseVideoTitle from here as it's exported with 'export function'
-export { normalizeString, calculateSimilarity };
+// NO named export block needed here as all functions are exported inline using 'export function'
