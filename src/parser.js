@@ -174,15 +174,20 @@ export function parseVideoTitle(title, conjuntos) {
 
   logger.info(`[parser] Parsing video title: ${title}`);
 
-  // Skip certain types of videos based on keywords
+  // --- Skip certain types of videos based on keywords ---
   const normalizedTitleForSkip = normalizeString(title);
-  if (
-    normalizedTitleForSkip.includes("pruebadeadmision") ||
-    normalizedTitleForSkip.includes("desfile") ||
-    normalizedTitleForSkip.includes("llamadas")
-  ) {
+  const skipKeywords = [
+    "pruebadeadmision",
+    "desfile",
+    "llamadas",
+    "primerpremio", // Added "primerpremio"
+  ];
+  const foundSkipKeyword = skipKeywords.find((kw) =>
+    normalizedTitleForSkip.includes(kw)
+  );
+  if (foundSkipKeyword) {
     logger.info(
-      "[parser] Skipping video based on title keywords (prueba, desfile, llamadas)"
+      `[parser] Skipping video based on title keyword: "${foundSkipKeyword}"`
     );
     return {
       year: null,
@@ -191,6 +196,7 @@ export function parseVideoTitle(title, conjuntos) {
       isAlternativeFormat: false,
     };
   }
+  // --- End Skip Logic ---
 
   let year = null;
   let conjunto = null;
@@ -438,4 +444,4 @@ export function parseVideoTitle(title, conjuntos) {
   return { year, conjunto, round, isAlternativeFormat };
 }
 
-// NO named export block needed here as all functions are exported inline using 'export function'
+// No named export block needed here as all functions are exported inline using 'export function'
