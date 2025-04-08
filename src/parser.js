@@ -145,6 +145,7 @@ function findBestConjuntoMatch(
  * @returns {Object} Parsed info: { year: string|null, conjunto: { name, category }|null, round: string|null, isAlternativeFormat: boolean }
  */
 export function parseVideoTitle(title, conjuntos) {
+  // Exported here
   if (!title || typeof title !== "string") {
     logger.warn(
       "[parser] Attempted to parse an empty, null, or non-string title."
@@ -216,14 +217,13 @@ export function parseVideoTitle(title, conjuntos) {
   // If a format matches structure but fails to find a component (like conjunto),
   // we discard the partial result from that format and allow fallback to general parsing.
 
-  let formatMatched = false; // Track if any specific format regex matched
+  let formatMatchedSuccessfully = false; // Track if any specific format fully succeeded
 
   // Format: "X Etapa YYYY - Name - Round" (Year present)
   const format1Regex =
     /(\d+(?:ta|ma|ra|da))?\s*Etapa\s*(\d{4})\s*-\s*(.+?)\s*-\s*(.+)/i;
   const format1Match = title.match(format1Regex);
   if (format1Match) {
-    formatMatched = true;
     const [_, etapa, matchedYear, namePartRaw, roundPart] = format1Match;
     const namePart = namePartRaw.trim();
     const potentialRound = roundPart.trim();
@@ -249,18 +249,17 @@ export function parseVideoTitle(title, conjuntos) {
         logger.debug(
           `[parser] Format 1: Successfully parsed all parts. Using this result.`
         );
-        // Successfully found all parts via this format
-        return {
-          year: matchedYear,
-          conjunto: matchedConjunto,
-          round: currentRound,
-          isAlternativeFormat: true,
-        };
+        formatMatchedSuccessfully = true; // Mark success
+        year = matchedYear;
+        conjunto = matchedConjunto;
+        round = currentRound;
+        isAlternativeFormat = true;
+        // Don't return early, let general parsing check if it finds *more* info? No, specific is better.
+        // return { year, conjunto, round, isAlternativeFormat };
       } else {
         logger.debug(
           `[parser] Format 1: Matched structure but failed to find conjunto for "${namePart}". Discarding partial result, allowing fallback.`
         );
-        // Don't set component variables, let general parsing try
       }
     } else {
       logger.debug(
@@ -270,12 +269,11 @@ export function parseVideoTitle(title, conjuntos) {
   }
 
   // Format: "X Etapa - Name - Round" (Year MISSING)
-  // Only try if Format 1 didn't successfully return
-  if (!formatMatched) {
+  // Only try if Format 1 didn't successfully find everything
+  if (!formatMatchedSuccessfully) {
     const format2Regex = /(\d+(?:ta|ma|ra|da))\s*Etapa\s*-\s*(.+?)\s*-\s*(.+)/i;
     const format2Match = title.match(format2Regex);
     if (format2Match) {
-      formatMatched = true;
       const [_, etapa, namePartRaw, roundPart] = format2Match;
       const namePart = namePartRaw.trim();
       const potentialRound = roundPart.trim();
@@ -301,18 +299,16 @@ export function parseVideoTitle(title, conjuntos) {
           logger.debug(
             `[parser] Format 2: Successfully parsed conjunto and round. Year is null. Using this result.`
           );
-          // Found conjunto and round, year is explicitly null for this format
-          return {
-            year: null,
-            conjunto: matchedConjunto,
-            round: currentRound,
-            isAlternativeFormat: true,
-          };
+          formatMatchedSuccessfully = true; // Mark success
+          year = null; // Explicitly null
+          conjunto = matchedConjunto;
+          round = currentRound;
+          isAlternativeFormat = true;
+          // return { year, conjunto, round, isAlternativeFormat };
         } else {
           logger.debug(
             `[parser] Format 2: Matched structure but failed to find conjunto for "${namePart}". Discarding partial result, allowing fallback.`
           );
-          // Don't set component variables
         }
       } else {
         logger.debug(
@@ -323,12 +319,11 @@ export function parseVideoTitle(title, conjuntos) {
   }
 
   // Format: 2015 Liguilla ("XA ETAPA NAME LIGUILLA")
-  // Only try if previous formats didn't successfully return
-  if (!formatMatched) {
+  // Only try if previous formats didn't successfully find everything
+  if (!formatMatchedSuccessfully) {
     const etapa2015FormatRegex = /^(\d)\s?A?\s?ETAPA\s+(.+?)\s+(LIGUILLA)$/i;
     const etapa2015Match = title.match(etapa2015FormatRegex);
     if (etapa2015Match) {
-      formatMatched = true;
       const [_, etapa, namePartRaw, roundPart] = etapa2015Match;
       const namePart = namePartRaw.trim();
       logger.debug(
@@ -348,12 +343,12 @@ export function parseVideoTitle(title, conjuntos) {
           logger.debug(
             `[parser] 2015 Format: Successfully parsed all parts. Using this result.`
           );
-          return {
-            year: "2015",
-            conjunto: matchedConjunto,
-            round: currentRound,
-            isAlternativeFormat: true,
-          };
+          formatMatchedSuccessfully = true; // Mark success
+          year = "2015";
+          conjunto = matchedConjunto;
+          round = currentRound;
+          isAlternativeFormat = true;
+          // return { year, conjunto, round, isAlternativeFormat };
         } else {
           logger.debug(
             `[parser] 2015 Format: Matched structure but failed to find conjunto for "${namePart}". Discarding partial result, allowing fallback.`
@@ -368,15 +363,63 @@ export function parseVideoTitle(title, conjuntos) {
   }
 
   // --- General Fallback Parsing ---
-  // This section runs if NO specific format above returned a complete result.
-  // It tries to find year, conjunto, and round independently from the whole title.
-  logger.debug("[parser] Attempting General Fallback Parsing...");
+  // This section runs if NO specific format above successfully found all components.
+  // It attempts to fill in missing pieces (year, conjunto, round) if they weren't found.
+  if (!formatMatchedSuccessfully) {
+    logger.debug(
+      "[parser] No specific format fully succeeded, attempting General Fallback Parsing..."
+    );
 
-  // Try finding conjunto generally using the whole title
-  conjunto = findBestConjuntoMatch(title, conjuntos, 0.85, logger, "(General)");
+    // Try finding conjunto generally using the whole title *if not already found*
+    if (!conjunto) {
+      conjunto = findBestConjuntoMatch(
+        title,
+        conjuntos,
+        0.85,
+        logger,
+        "(General Fallback)"
+      );
+      if (!conjunto) {
+        logger.info("[parser] Fallback failed to find Conjunto.");
+        // If no conjunto found even in fallback, return failure
+        return {
+          year: null,
+          conjunto: null,
+          round: null,
+          isAlternativeFormat: false,
+        };
+      }
+    }
+
+    // Try finding year generally *if not already found*
+    if (!year) {
+      const yearMatch = title.match(/\b(19[89]\d|20\d{2})\b/);
+      year = yearMatch ? yearMatch[0] : null;
+      if (!year) {
+        logger.info("[parser] Fallback failed to find Year.");
+      }
+    }
+
+    // Try finding round generally *if not already found*
+    if (!round) {
+      const titleLowerNorm = normalizeString(title);
+      const matchedRoundKeyword = normalizedRoundKeywords.find((kw) =>
+        titleLowerNorm.includes(kw)
+      );
+      round = matchedRoundKeyword ? roundLookup[matchedRoundKeyword] : null;
+      if (!round) {
+        logger.debug("[parser] Fallback did not find Round.");
+      }
+    }
+    isAlternativeFormat = false; // General parsing is not an alternative format
+  } // End of general fallback parsing block
+
+  // Final Result Consolidation / Logging
   if (!conjunto) {
-    logger.info("[parser] Fallback failed to find Conjunto.");
-    // If no conjunto found even in fallback, we cannot proceed meaningfully
+    // This case should ideally be handled by the return inside the fallback block
+    logger.error(
+      "[parser] Final Result: Reached end without identifying Conjunto. This shouldn't happen."
+    );
     return {
       year: null,
       conjunto: null,
@@ -384,32 +427,20 @@ export function parseVideoTitle(title, conjuntos) {
       isAlternativeFormat: false,
     };
   }
-
-  // Try finding year generally
-  const yearMatch = title.match(/\b(19[89]\d|20\d{2})\b/);
-  year = yearMatch ? yearMatch[0] : null;
   if (!year) {
-    logger.info("[parser] Fallback failed to find Year.");
-    // We might still have a conjunto, but year is required by processor (unless forced)
+    logger.info(
+      `[parser] Final Result: Identified conjunto (${conjunto?.name}), Round (${round}) but not Year.`
+    );
+  } else {
+    logger.info(
+      `[parser] Final Result: Year=${year}, Conjunto=${conjunto?.name}, Round=${round}`
+    );
   }
 
-  // Try finding round generally
-  const titleLowerNorm = normalizeString(title);
-  const matchedRoundKeyword = normalizedRoundKeywords.find((kw) =>
-    titleLowerNorm.includes(kw)
-  );
-  round = matchedRoundKeyword ? roundLookup[matchedRoundKeyword] : null;
-  if (!round) {
-    logger.debug("[parser] Fallback did not find Round.");
-  }
-
-  logger.info(
-    `[parser] Fallback Result: Year=${year}, Conjunto=${conjunto?.name}, Round=${round}`
-  );
-  // Return the combined result from fallback parsing
-  // isAlternativeFormat remains false because we didn't use a specific format rule here.
-  return { year, conjunto, round, isAlternativeFormat: false };
+  // Return the combined result
+  return { year, conjunto, round, isAlternativeFormat };
 }
 
 // Make sure exports are correct
-export { normalizeString, calculateSimilarity, parseVideoTitle };
+// Remove parseVideoTitle from here as it's exported with 'export function'
+export { normalizeString, calculateSimilarity };
