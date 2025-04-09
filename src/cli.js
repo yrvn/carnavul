@@ -131,10 +131,16 @@ async function run() {
           `Ignored (No Match Year/Conjunto - Collection Pass): ${stats.ignored_no_match}`
         );
         console.log(
-          `Skipped (Lower Round Priority): ${stats.skipped_lower_round}`
+          `Skipped (Lower Round Priority than Chosen Liguilla): ${stats.skipped_lower_round}`
+        );
+        // Add the new stat here
+        console.log(
+          `Skipped Group (Highest Available Not Liguilla): ${stats.skipped_potential_lower_priority}`
         );
         console.log(`----------------------------------------------------`);
-        console.log(`Chosen Videos Processed: ${stats.processed}`);
+        console.log(
+          `Chosen Videos Processed (Liguilla Only): ${stats.processed}`
+        ); // Clarified this count
         console.log(` -> Downloaded/Archived: ${stats.downloaded}`);
         console.log(` -> Marked for Check Later: ${stats.checkLater}`);
         console.log(` -> Failed: ${stats.failed}`);

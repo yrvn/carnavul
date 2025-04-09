@@ -8,8 +8,8 @@ import {
   readTrackingJson,
   writeTrackingJson,
   addTrackingEntry,
-  removeTrackingEntryById, // <-- Import new function
-  getTrackingIds, // <-- Import new function
+  removeTrackingEntryById, // Keep for failed handling
+  getTrackingIds, // Keep for failed handling
 } from "./state.js";
 
 // Helper function to determine round priority
@@ -63,6 +63,7 @@ export async function processChannel(
     skipped_already_downloaded: 0, // Videos skipped *before* collection
     ignored_no_match: 0, // Videos ignored during collection (no year/conjunto)
     skipped_lower_round: 0, // Videos skipped *after* collection because a higher round was chosen
+    skipped_potential_lower_priority: 0, // New stat: Skipped group because highest available wasn't Liguilla
     processed: 0, // *Chosen* videos attempted (metadata fetch + download/checkLater/fail)
     downloaded: 0, // Chosen videos successfully downloaded/archived
     checkLater: 0, // Chosen videos marked for check later
@@ -91,6 +92,7 @@ export async function processChannel(
 
   try {
     // --- First Pass: Collect Potential Videos ---
+    // (This part remains the same - collects non-downloaded videos)
     logger.info("Starting Pass 1: Collecting video information...");
     logger.debug(`Fetching flat playlist info for: ${channelUrl}`);
     const channelInfo = await youtubeDl(channelUrl, {
@@ -98,7 +100,7 @@ export async function processChannel(
       noWarnings: true,
       noCallHome: true,
       flatPlaylist: true,
-      playlistReverse: true, // Consider if reverse is always desired
+      playlistReverse: true,
     });
     logger.debug(`Flat playlist info fetched for: ${channelUrl}`);
 
@@ -168,7 +170,6 @@ export async function processChannel(
       }
 
       // 3. *** CRUCIAL CHECK ***
-      // Need BOTH a valid `conjunto` from parsing AND an `effectiveYear` (parsed or forced)
       if (!parsedInfo.conjunto || !effectiveYear) {
         let reason = "Could not reliably identify ";
         const missing = [];
@@ -176,11 +177,9 @@ export async function processChannel(
         if (!effectiveYear) missing.push("year (from title or --year flag)");
         reason += missing.join(" and ");
         reason += ` for title: "${videoStub.title}"`;
-
         logger.info(
           `[Processor Check Failed] ${reason}, marking as ignored during collection.`
         );
-        // Add to ignored file
         await addTrackingEntry(trackingFiles.ignoredPath, {
           id: videoStub.id,
           title: videoStub.title,
@@ -193,17 +192,16 @@ export async function processChannel(
         continue; // Skip collection
       }
 
-      // 4. Store potential video info (Only reached if check passes)
+      // 4. Store potential video info
       const conjuntoName = parsedInfo.conjunto.name;
       const roundPriority = getRoundPriority(parsedInfo.round);
-
       const potentialVideo = {
         id: videoStub.id,
         url: videoStub.url,
-        title: videoStub.title,
+        title: videoStub.title, // Keep original title from stub for logging
         parsedInfo: {
           year: effectiveYear,
-          conjunto: parsedInfo.conjunto,
+          conjunto: parsedInfo.conjunto, // Keep the full {name, category} object
           round: parsedInfo.round,
         },
         roundPriority: roundPriority,
@@ -234,13 +232,15 @@ export async function processChannel(
     logger.info(
       "Starting Pass 2: Selecting highest round and processing chosen videos..."
     );
-    let processedCount = 0;
+    let processedCount = 0; // Tracks attempts within this pass
 
     for (const [year, yearMap] of potentialVideosMap.entries()) {
       for (const [conjuntoName, videosForConjunto] of yearMap.entries()) {
         if (videosForConjunto.length === 0) continue;
 
-        // Find the video with the highest round priority
+        processedCount++; // Tentatively count this group as being processed
+
+        // Find the video with the highest round priority *among collected*
         let chosenVideo = videosForConjunto[0];
         for (let i = 1; i < videosForConjunto.length; i++) {
           if (videosForConjunto[i].roundPriority > chosenVideo.roundPriority) {
@@ -248,38 +248,60 @@ export async function processChannel(
           }
         }
 
-        processedCount++;
-        stats.processed++;
         logger.info(
-          `(${processedCount}) For ${conjuntoName} ${year}, chosen video: ${
-            chosenVideo.title
-          } (ID: ${chosenVideo.id}, Round: ${
-            chosenVideo.parsedInfo.round || "N/A"
-          }, Priority: ${chosenVideo.roundPriority})`
+          `(${processedCount}) Checking group for ${conjuntoName} ${year}. Highest available priority is ${chosenVideo.roundPriority} for video: ${chosenVideo.title} (ID: ${chosenVideo.id})`
         );
 
-        // Log skipped videos for this group
+        // *** NEW CHECK (Plan 5) ***
+        // If the highest priority video found *among the collected (non-downloaded)*
+        // is NOT Liguilla (Priority 3), skip this entire group.
+        if (chosenVideo.roundPriority < 3) {
+          logger.warn(
+            // Changed to warn level for visibility
+            `(${processedCount}) SKIPPING Group for ${conjuntoName} ${year}. Highest available priority (${chosenVideo.roundPriority}) is not Liguilla (3). Assuming Liguilla is handled elsewhere (e.g., already downloaded). Won't process lower priority: ${chosenVideo.title}`
+          );
+          // Log all videos in this group as skipped due to this rule
+          for (const video of videosForConjunto) {
+            // Optionally add to ignored.json or just log
+            logger.debug(
+              ` -> Video skipped by Liguilla rule: ${video.title} (ID: ${video.id})`
+            );
+            stats.skipped_potential_lower_priority++;
+          }
+          // We didn't actually process this group, so don't count it in the final 'processed' stat
+          // stats.processed++; // This was incremented earlier, now we skip
+          continue; // Skip to the next conjunto/year group
+        }
+        // *** END NEW CHECK ***
+
+        // If we reach here, chosenVideo.roundPriority === 3 (It's Liguilla)
+        // Increment the actual processed count only when we proceed
+        stats.processed++;
+        logger.info(
+          `(${processedCount}) Processing chosen Liguilla video for ${conjuntoName} ${year}: ${chosenVideo.title} (ID: ${chosenVideo.id})`
+        );
+
+        // Log skipped videos for this group (these are lower priority than the chosen Liguilla)
         for (const video of videosForConjunto) {
           if (video.id !== chosenVideo.id) {
             logger.info(
               ` -> Skipping lower priority video: ${video.title} (ID: ${video.id}, Priority: ${video.roundPriority})`
             );
             stats.skipped_lower_round++;
-            // Add to ignored.json
             await addTrackingEntry(trackingFiles.ignoredPath, {
               id: video.id,
               title: video.title,
               url: video.url,
-              reason: `Skipped: Lower round priority (${video.roundPriority}) compared to chosen video ${chosenVideo.id} (Priority: ${chosenVideo.roundPriority}) for ${conjuntoName} ${year}`,
+              reason: `Skipped: Lower round priority (${video.roundPriority}) compared to chosen Liguilla video ${chosenVideo.id} for ${conjuntoName} ${year}`,
               parsedInfo: video.parsedInfo,
             });
           }
         }
 
-        // Now, process the chosenVideo
+        // Now, process the chosenVideo (which must be Liguilla)
         let videoInfo; // Full metadata
         try {
-          // Log forced year override only if it actually happened for the chosen video
+          // Log forced year override if necessary
           const originalParsedInfo = parseVideoTitle(chosenVideo.title, config);
           if (
             forcedYear &&
@@ -303,10 +325,10 @@ export async function processChannel(
             `Full metadata fetched for ${chosenVideo.id}. Duration: ${videoInfo.duration}s`
           );
 
-          // Check if video should be downloaded based on full info and *chosen* parsed info
+          // Check if video should be downloaded
           const downloadDecision = shouldDownload(
             videoInfo,
-            chosenVideo.parsedInfo, // Contains { year, conjunto, round }
+            chosenVideo.parsedInfo,
             logger
           );
 
@@ -325,17 +347,16 @@ export async function processChannel(
               duration: videoInfo.duration,
             });
             stats.checkLater++;
-            continue;
+            continue; // Skip download part for this video
           }
 
-          // Prepare for download using chosenVideo.parsedInfo
+          // Prepare for download
           const outputDir = path.join(
             baseDir,
             chosenVideo.parsedInfo.year,
             chosenVideo.parsedInfo.conjunto.category
           );
           await fs.ensureDir(outputDir);
-
           const baseFilename = `${chosenVideo.parsedInfo.conjunto.name} ${
             chosenVideo.parsedInfo.year
           }${
@@ -369,7 +390,7 @@ export async function processChannel(
                 `Successfully processed chosen video ${chosenVideo.id}`
               );
 
-              // *** NEW: Remove from failed.json if it was there ***
+              // Remove from failed.json if it was there
               if (failedSet.has(chosenVideo.id)) {
                 await removeTrackingEntryById(
                   trackingFiles.failedPath,
@@ -379,9 +400,8 @@ export async function processChannel(
                 logger.info(
                   `Removed successfully processed video ${chosenVideo.id} from failed.json.`
                 );
-                failedSet.delete(chosenVideo.id); // Update in-memory set too
+                failedSet.delete(chosenVideo.id);
               }
-              // *** END NEW ***
             } else {
               logger.warn(
                 `downloadVideo indicated failure for chosen video ${chosenVideo.id}, marking as failed.`
@@ -415,7 +435,7 @@ export async function processChannel(
             });
           }
         } catch (processingError) {
-          // Catch errors during metadata fetch or shouldDownload check for the chosen video
+          // Catch errors during metadata fetch or shouldDownload check
           logger.error(
             `Error processing chosen video ${chosenVideo.id} ('${chosenVideo.title}')`,
             { error: processingError.message, stack: processingError.stack }
@@ -453,20 +473,16 @@ export async function processChannel(
 }
 
 // --- processSingleVideo ---
+// (No changes needed here for the Liguilla priority rule, but keep failed removal logic)
 export async function processSingleVideo(
   videoUrl,
   baseDir,
   trackingFiles,
   config,
-  downloadedSet, // Keep for initial check
+  downloadedSet,
   logger,
-  forcedYear = null // Accept forcedYear from CLI
+  forcedYear = null
 ) {
-  logger.info(`Processing single video: ${videoUrl}`);
-  if (forcedYear) {
-    logger.info(`--year option provided: ${forcedYear}`);
-  }
-
   // --- Load Failed Video IDs ---
   let failedSet = new Set();
   try {
@@ -482,7 +498,12 @@ export async function processSingleVideo(
   }
   // --- End Load Failed Video IDs ---
 
-  let videoInfo; // Declare here to use in catch block if needed
+  // ... (rest of the function is unchanged from the previous version) ...
+  logger.info(`Processing single video: ${videoUrl}`);
+  if (forcedYear) {
+    logger.info(`--year option provided: ${forcedYear}`);
+  }
+  let videoInfo;
 
   try {
     // 1. Get full video info
@@ -506,7 +527,7 @@ export async function processSingleVideo(
     // 3. Parse video title
     const parsedInfo = parseVideoTitle(videoInfo.title, config);
 
-    // *** MODIFIED YEAR LOGIC FOR SINGLE VIDEO ***
+    // 4. Determine effective year (logic unchanged)
     let effectiveYear = parsedInfo.year;
     if (!effectiveYear && forcedYear) {
       logger.info(
@@ -524,9 +545,8 @@ export async function processSingleVideo(
     } else if (!parsedInfo.year && !forcedYear) {
       logger.info("No year found in title and --year option not provided.");
     }
-    // *** END MODIFIED YEAR LOGIC ***
 
-    // 4. Check if we have an effective year and a conjunto
+    // 5. Check if we have an effective year and a conjunto
     if (!effectiveYear || !parsedInfo.conjunto) {
       let reason = "Could not identify ";
       if (!effectiveYear && !parsedInfo.conjunto)
@@ -557,7 +577,7 @@ export async function processSingleVideo(
       }`
     );
 
-    // 5. Check if video should be downloaded
+    // 6. Check if video should be downloaded
     const downloadCheckInfo = {
       year: effectiveYear,
       conjunto: parsedInfo.conjunto,
@@ -569,7 +589,6 @@ export async function processSingleVideo(
       downloadCheckInfo,
       logger
     );
-
     if (!downloadDecision.download) {
       logger.info(
         `Video ${videoInfo.id} marked for check later: ${downloadDecision.reason}`
@@ -587,20 +606,19 @@ export async function processSingleVideo(
       return { status: "check_later", reason: downloadDecision.reason };
     }
 
-    // 6. Prepare for download
+    // 7. Prepare for download
     const outputDir = path.join(
       baseDir,
       effectiveYear,
       parsedInfo.conjunto.category
     );
     await fs.ensureDir(outputDir);
-
     const baseFilename = `${parsedInfo.conjunto.name} ${effectiveYear}${
       parsedInfo.round ? ` - ${parsedInfo.round}` : ""
     }`;
     const expectedNfoPath = path.join(outputDir, baseFilename + ".nfo");
 
-    // 7. Download video
+    // 8. Download video
     let success = false;
     try {
       success = await downloadVideo(
@@ -621,8 +639,7 @@ export async function processSingleVideo(
 
       if (success) {
         logger.info(`Successfully processed single video ${videoInfo.id}`);
-
-        // *** NEW: Remove from failed.json if it was there ***
+        // Remove from failed.json if it was there
         if (failedSet.has(videoInfo.id)) {
           await removeTrackingEntryById(
             trackingFiles.failedPath,
@@ -633,8 +650,6 @@ export async function processSingleVideo(
             `Removed successfully processed video ${videoInfo.id} from failed.json.`
           );
         }
-        // *** END NEW ***
-
         return { status: "downloaded", path: expectedNfoPath };
       } else {
         logger.error(
@@ -689,15 +704,14 @@ export async function processSingleVideo(
 }
 
 // --- processCheckLater ---
+// (No changes needed here for the Liguilla priority rule, but keep failed removal logic)
 export async function processCheckLater(
   baseDir,
   trackingFiles,
   config,
-  downloadedSet, // Keep for initial check
+  downloadedSet,
   logger
 ) {
-  logger.info("Processing check_later list");
-
   // --- Load Failed Video IDs ---
   let failedSet = new Set();
   try {
@@ -713,6 +727,8 @@ export async function processCheckLater(
   }
   // --- End Load Failed Video IDs ---
 
+  // ... (rest of the function is unchanged from the previous version) ...
+  logger.info("Processing check_later list");
   const stats = {
     total_items: 0,
     processed: 0,
@@ -722,23 +738,21 @@ export async function processCheckLater(
     failed: 0,
     incomplete_no_download_flag: 0,
   };
-
   let checkLaterItems = [];
   try {
     checkLaterItems = await readTrackingJson(trackingFiles.checkLaterPath);
     stats.total_items = checkLaterItems.length;
     logger.info(`Found ${stats.total_items} items in check_later list`);
-
-    const remainingCheckLater = []; // Items that are not processed in this run
+    const remainingCheckLater = [];
 
     for (const item of checkLaterItems) {
+      // ... (skip invalid, skip no 'download: true') ...
       if (!item || !item.id || !item.url || !item.title) {
         logger.warn("Skipping invalid item in check_later.json:", item);
         remainingCheckLater.push(item);
         stats.incomplete_no_download_flag++;
         continue;
       }
-
       if (item.download !== true) {
         logger.debug(
           `Item ${item.id} does not have 'download: true' flag, skipping.`
@@ -747,23 +761,23 @@ export async function processCheckLater(
         stats.incomplete_no_download_flag++;
         continue;
       }
-
       stats.processed++;
       logger.info(
         `Processing check_later item ${stats.processed}/${stats.total_items}: ${item.title} (ID: ${item.id})`
       );
 
+      // ... (check downloadedSet) ...
       if (downloadedSet.has(item.id)) {
         logger.info(
           `Video ${item.id} already downloaded (initial check), skipping.`
         );
         stats.skipped_already_downloaded++;
-        // Don't add back to remainingCheckLater
         continue;
       }
 
       let videoInfo;
       try {
+        // ... (fetch videoInfo) ...
         logger.debug(`Fetching full metadata for ${item.id}...`);
         videoInfo = await youtubeDl(item.url, {
           dumpSingleJson: true,
@@ -774,11 +788,11 @@ export async function processCheckLater(
           `Full metadata fetched for ${item.id}. Duration: ${videoInfo.duration}s`
         );
 
+        // ... (re-parse title, determine effective info) ...
         const parsedInfo = parseVideoTitle(videoInfo.title, config);
         let effectiveYear = parsedInfo.year;
         let effectiveConjunto = parsedInfo.conjunto;
         let effectiveRound = parsedInfo.round;
-
         // *** Prioritize data from check_later.json item if present ***
         let usingCheckLaterData = false;
         if (item.year) {
@@ -823,6 +837,7 @@ export async function processCheckLater(
         }
         // *** End check_later.json data logic ***
 
+        // ... (check effectiveYear/conjunto, add to ignored if needed) ...
         if (!effectiveYear || !effectiveConjunto) {
           let reason = "Could not identify ";
           if (!effectiveYear && !effectiveConjunto)
@@ -846,7 +861,6 @@ export async function processCheckLater(
           stats.ignored_no_match++;
           continue; // Don't add back to remainingCheckLater
         }
-
         if (usingCheckLaterData) {
           logger.info(
             `Processing check_later item ${
@@ -865,13 +879,13 @@ export async function processCheckLater(
           );
         }
 
+        // ... (prepare for download) ...
         const outputDir = path.join(
           baseDir,
           effectiveYear,
           effectiveConjunto.category
         );
         await fs.ensureDir(outputDir);
-
         const baseFilename = `${effectiveConjunto.name} ${effectiveYear}${
           effectiveRound ? ` - ${effectiveRound}` : ""
         }`;
@@ -897,8 +911,7 @@ export async function processCheckLater(
           if (success) {
             stats.downloaded++;
             logger.info(`Successfully processed check_later item ${item.id}`);
-
-            // *** NEW: Remove from failed.json if it was there ***
+            // Remove from failed.json if it was there
             if (failedSet.has(item.id)) {
               await removeTrackingEntryById(
                 trackingFiles.failedPath,
@@ -909,8 +922,6 @@ export async function processCheckLater(
                 `Removed successfully processed video ${item.id} from failed.json (via check_later).`
               );
             }
-            // *** END NEW ***
-
             // Don't add back to remainingCheckLater
           } else {
             stats.failed++;
@@ -961,7 +972,6 @@ export async function processCheckLater(
     logger.info(
       `Updated check_later.json, ${remainingCheckLater.length} items remain.`
     );
-
     logger.info("Finished processing check_later list.", stats);
     return stats;
   } catch (error) {
