@@ -125,22 +125,19 @@ async function run() {
         console.log("----------------------------------------------------");
         console.log(`Total Videos Found in Playlist: ${stats.total}`);
         console.log(
-          `Skipped (Already Downloaded - Initial Check): ${stats.skipped_already_downloaded}`
+          `Skipped (Invalid Title/Private/Deleted - In Collection): ${stats.skipped_already_downloaded_in_collection}` // Renamed stat
         );
         console.log(
           `Ignored (No Match Year/Conjunto - Collection Pass): ${stats.ignored_no_match}`
         );
         console.log(
-          `Skipped (Lower Round Priority than Chosen Liguilla): ${stats.skipped_lower_round}`
+          `Skipped (Lower Round Priority than Chosen Video): ${stats.skipped_lower_round_than_chosen}` // Renamed stat
         );
-        // Add the new stat here
         console.log(
-          `Skipped Group (Highest Available Not Liguilla): ${stats.skipped_potential_lower_priority}`
+          `Skipped Group (Highest Priority Video Already Downloaded): ${stats.skipped_group_high_priority_downloaded}` // New stat
         );
         console.log(`----------------------------------------------------`);
-        console.log(
-          `Chosen Videos Processed (Liguilla Only): ${stats.processed}`
-        ); // Clarified this count
+        console.log(`Highest Priority Videos Attempted: ${stats.processed}`); // Clarified this count
         console.log(` -> Downloaded/Archived: ${stats.downloaded}`);
         console.log(` -> Marked for Check Later: ${stats.checkLater}`);
         console.log(` -> Failed: ${stats.failed}`);
@@ -192,7 +189,7 @@ async function run() {
         );
         console.log(` -> Downloaded/Archived: ${stats.downloaded}`);
         console.log(
-          ` -> Skipped (Already Downloaded): ${stats.skipped_already_downloaded}`
+          ` -> Skipped (Already Downloaded): ${stats.skipped_already_downloaded}` // This stat name is fine for check_later context
         );
         console.log(` -> Ignored (No Match): ${stats.ignored_no_match}`);
         console.log(` -> Failed: ${stats.failed}`);
